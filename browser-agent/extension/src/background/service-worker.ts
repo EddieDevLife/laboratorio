@@ -18,7 +18,7 @@ chrome.runtime.onMessage.addListener(
 // ─── Listener para mensagens externas (React app) ─────────────────────────────
 
 chrome.runtime.onMessageExternal.addListener(
-  (message: any, sender, sendResponse) => {
+  (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void) => {
     handleExternalMessage(message, sender, sendResponse);
     return true; // canal assíncrono
   }
@@ -33,7 +33,7 @@ async function handleMessage(
     // ── Pedido do side panel ───────────────────────────────────────────────────
     case 'CAPTURE_TREE_FOR_TAB': {
       const { tabId } = message.payload;
-      await captureAndBroadcast(tabId, sender);
+      await captureAndBroadcast(tabId);
       sendResponse({ ok: true });
       break;
     }
@@ -58,7 +58,6 @@ async function handleMessage(
 
     case 'WS_SEND_SNAPSHOT': {
       const { tabId } = (message as Extract<InternalMessage, { type: 'WS_SEND_SNAPSHOT' }>).payload;
-      // Captura snapshot e envia ao backend via WebSocket
       await captureAndSendToBackend(tabId);
       sendResponse({ ok: true });
       break;
@@ -66,14 +65,12 @@ async function handleMessage(
 
     case 'WS_ENVIAR_COMANDO': {
       const { tarefaId, comando, tabId } = (message as Extract<InternalMessage, { type: 'WS_ENVIAR_COMANDO' }>).payload;
-      
-      // Conecta ao backend se não estiver conectado
+
       if (!isConnected()) {
         connect();
         await delay(1000);
       }
 
-      // Envia comando ao backend
       broadcastToSidePanel({
         type: 'STATUS_UPDATE',
         payload: { status: 'running', message: '🔍 Analisando comando...' }
@@ -88,9 +85,7 @@ async function handleMessage(
         }
       });
 
-      // Captura e envia snapshot da aba
       await captureAndSendToBackend(tabId);
-      
       sendResponse({ ok: true });
       break;
     }
@@ -104,17 +99,29 @@ async function handleMessage(
           sender.tab!.windowId!,
           { format: 'png' }
         );
+        sendResponse({ ok: true, imageBase64: dataUrl.split(',')[1] });
+      } catch (err) {
+        sendResponse({ error: String(err) });
+      }
+      break;
+    }
+
+    default:
+      sendResponse({ ok: false, error: `Tipo desconhecido: ${(message as { type: string }).type}` });
+  }
+}
 
 // ─── Handler para mensagens externas (React app) ──────────────────────────────
 
 async function handleExternalMessage(
-  message: any,
+  message: unknown,
   sender: chrome.runtime.MessageSender,
   sendResponse: (r?: unknown) => void
 ) {
-  console.log('[service-worker] External message:', message.type, 'from:', sender.url);
+  const msg = message as { type?: string; payload?: Record<string, unknown> };
+  console.log('[service-worker] External message:', msg.type, 'from:', sender.url);
 
-  switch (message.type) {
+  switch (msg.type) {
     // ── Ping para verificar conexão ────────────────────────────────────────────
     case 'PING': {
       sendResponse({
@@ -130,7 +137,7 @@ async function handleExternalMessage(
       try {
         const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (tabs[0]?.id) {
-          await captureAndBroadcast(tabs[0].id, sender);
+          await captureAndBroadcast(tabs[0].id);
           sendResponse({ success: true });
         } else {
           sendResponse({ success: false, error: 'No active tab found' });
@@ -184,20 +191,18 @@ async function handleExternalMessage(
 
     // ── Executar comando AI ────────────────────────────────────────────────────
     case 'EXECUTE_COMMAND': {
-      const { command, taskObjective } = message.payload || {};
+      const { command, taskObjective } = msg.payload ?? {};
       if (!command) {
         sendResponse({ success: false, error: 'No command provided' });
         break;
       }
 
       try {
-        // Conecta ao backend se não estiver conectado
         if (!isConnected()) {
           connect();
-          await delay(1000); // Aguarda conexão
+          await delay(1000);
         }
 
-        // Envia comando ao backend
         const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (tabs[0]?.id) {
           const taskId = `task-${Date.now()}`;
@@ -205,14 +210,12 @@ async function handleExternalMessage(
             type: 'task_start',
             payload: {
               taskId,
-              objective: taskObjective || command,
+              objective: (taskObjective as string) || (command as string),
               autonomyLevel: 'semi'
             }
           });
 
-          // Captura e envia snapshot
           await captureAndSendToBackend(tabs[0].id);
-          
           sendResponse({ success: true, taskId });
         } else {
           sendResponse({ success: false, error: 'No active tab found' });
@@ -237,18 +240,7 @@ async function handleExternalMessage(
     }
 
     default:
-      sendResponse({ success: false, error: `Unknown message type: ${message.type}` });
-  }
-}
-        sendResponse({ ok: true, imageBase64: dataUrl.split(',')[1] });
-      } catch (err) {
-        sendResponse({ error: String(err) });
-      }
-      break;
-    }
-
-    default:
-      sendResponse({ ok: false, error: `Tipo desconhecido: ${(message as { type: string }).type}` });
+      sendResponse({ success: false, error: `Unknown message type: ${msg.type}` });
   }
 }
 
@@ -256,8 +248,7 @@ async function handleExternalMessage(
 //
 // Prioridade: chrome.automation (screen reader API) → CDP → DOM traversal
 //
-async function captureAndBroadcast(tabId: number, sender: chrome.runtime.MessageSender) {
-  // Tenta obter informações da aba para o snapshot
+async function captureAndBroadcast(tabId: number) {
   let tab: chrome.tabs.Tab | undefined;
   try {
     tab = await chrome.tabs.get(tabId);
@@ -276,13 +267,12 @@ async function captureAndBroadcast(tabId: number, sender: chrome.runtime.Message
       title: tab.title ?? '',
       timestamp: Date.now(),
       tree: automationTree,
-      source: 'cdp', // reutilizando 'cdp' como 'não-dom'; será 'automation' na Fase 2
+      source: 'cdp',
       scrollX: 0,
       scrollY: 0,
       viewportWidth: 0,
       viewportHeight: 0,
     };
-    // Enriquece com dados de scroll/viewport via content script (sem bloquear)
     chrome.tabs.sendMessage(tabId, { type: 'ENRICH_SNAPSHOT', payload: snapshot } as InternalMessage)
       .catch(() => broadcastToSidePanel({ type: 'TREE_CAPTURED', payload: snapshot }));
     return;
@@ -315,15 +305,12 @@ async function captureAndBroadcast(tabId: number, sender: chrome.runtime.Message
       type: 'CAPTURE_TREE',
       payload: { tabId },
     } as InternalMessage);
-    // O content script vai enviar TREE_CAPTURED ao runtime → SW re-emite ao side panel
   } catch {
-    // Content script não carregado — tenta injetar via scripting API
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
         files: ['content/index.js'],
       });
-      // Aguarda um tick e tenta novamente
       await delay(500);
       await chrome.tabs.sendMessage(tabId, {
         type: 'CAPTURE_TREE',
@@ -344,7 +331,6 @@ function broadcastError(tabId: number, error: string) {
   console.error(`[browser-agent][tab:${tabId}] ${error}`);
 }
 
-// Captura snapshot e envia ao backend via WebSocket (Fase 2+)
 async function captureAndSendToBackend(tabId: number) {
   if (!isConnected()) {
     broadcastError(tabId, 'WebSocket não conectado. Clique em "Conectar Backend" primeiro.');

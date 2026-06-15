@@ -12,13 +12,11 @@ interface CommandLog {
 
 export function CommandCenter() {
   const {
-    tree,
     focusableElements,
     captureTree,
     findElementByLabel,
     getElementCenter,
     activateElement,
-    navigateByTab,
   } = useAccessibilityTree();
 
   const {

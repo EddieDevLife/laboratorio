@@ -5,6 +5,7 @@ const LABELS: Record<AgentStatus, string> = {
   scanning: 'Escaneando...',
   running: 'Executando',
   waiting: 'Aguardando LLM',
+  done: 'Concluído',
   error: 'Erro',
 };
 

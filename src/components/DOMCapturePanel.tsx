@@ -137,7 +137,13 @@ function NodeDetail({ node }: { node: DOMNode }) {
 
 type ActiveTab = 'tree' | 'interactive' | 'aria' | 'json';
 
-export function DOMCapturePanel() {
+export function DOMCapturePanel({
+  initialTab,
+  onCapture,
+}: {
+  initialTab?: ActiveTab;
+  onCapture?: () => void;
+} = {}) {
   const {
     snapshot,
     capturing,
@@ -151,7 +157,7 @@ export function DOMCapturePanel() {
     findByName,
   } = useDOMCapture();
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('tree');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab ?? 'tree');
   const [selectedUID, setSelectedUID] = useState<string | null>(null);
   const [copyDone, setCopyDone] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,7 +167,8 @@ export function DOMCapturePanel() {
   const handleCapture = useCallback(() => {
     setSelectedUID(null);
     capture();
-  }, [capture]);
+    onCapture?.();
+  }, [capture, onCapture]);
 
   const handleCopy = useCallback(async () => {
     await copyJSON();

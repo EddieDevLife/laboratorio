@@ -16,7 +16,6 @@ export interface MouseCommand {
  */
 export function useMouseControl() {
   const cursorRef = useRef<HTMLDivElement | null>(null);
-  const commandQueueRef = useRef<MouseCommand[]>([]);
   const isMovingRef = useRef(false);
 
   /**

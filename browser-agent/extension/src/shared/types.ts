@@ -148,16 +148,15 @@ export type InternalMessage =
   | { type: 'USER_COMMAND'; payload: { command: string; snapshot: PageSnapshot; screenshot?: string } }
   | { type: 'GET_API_KEY_STATUS' }
   | { type: 'SET_API_KEY'; payload: { apiKey: string } }
-  | { type: 'START_TASK'; payload: { tabId: number; objective: string } }
-  | { type: 'STOP_TASK' }
-  | { type: 'AGENT_STATE'; payload: AgentState }
   | { type: 'EXECUTE_ACTION'; payload: Record<string, unknown> }
+  | { type: '__PING__' }
+  | { type: 'AGENT_STATE'; payload: AgentState }
   | { type: 'CONFIRM_ACTION'; payload: { confirmed: boolean } };
 
-export type AgentStatus = 'idle' | 'scanning' | 'running' | 'waiting' | 'error';
+export type AgentStatus = 'idle' | 'scanning' | 'running' | 'waiting' | 'done' | 'error';
 
 export interface AgentState {
-  status: 'idle' | 'running' | 'done' | 'error';
+  status: AgentStatus;
   step: number;
   lastAction?: string;
   lastReasoning?: string;

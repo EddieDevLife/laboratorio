@@ -11,11 +11,8 @@
  *   6. Repete até "done" ou limite
  */
 
-import { callClaude, getSettings, type Message, type ContentBlock, type Tool } from './llm-client.js';
+import { callClaude, getSettings, type Message, type Tool } from './llm-client.js';
 import type { InternalMessage, AccessibilityNode, PageSnapshot } from '../shared/types.js';
-import { buildNarration } from './narration.js';
-import { isDestructive } from './destructive-detector.js';
-import { CAPTURE_TIMEOUT_MS, SCRIPT_INJECT_DELAY_MS } from '../shared/timing.js';
 
 const MAX_STEPS = 30;
 const COMPUTER_USE_THRESHOLD = 3;
@@ -59,8 +56,6 @@ const INTERACTIVE_ROLES = new Set([
   'checkbox', 'radio', 'menuitem', 'tab', 'option',
   'slider', 'spinbutton', 'switch',
 ]);
-
-interface IndexedNode { index: number; node: AccessibilityNode }
 
 function serializeTree(
   node: AccessibilityNode,
@@ -121,8 +116,6 @@ export interface LoopState {
   step: number;
   lastAction?: string;
   lastReasoning?: string;
-  narration: string;
-  isDestructive?: boolean;
   error?: string;
 }
 
@@ -136,7 +129,6 @@ export class AgentLoop {
   private lastPageText: string | null = null;
   private onStatusChange: (s: LoopState) => void;
   private stopped = false;
-  private confirmationResolve: ((confirmed: boolean) => void) | null = null;
 
   constructor(opts: {
     tabId: number;
@@ -148,21 +140,13 @@ export class AgentLoop {
     this.onStatusChange = opts.onStatusChange;
   }
 
-  stop() {
-    this.stopped = true;
-    this.confirmationResolve?.(false);
-  }
+  stop() { this.stopped = true; }
+
+  private confirmationResolver: ((confirmed: boolean) => void) | null = null;
 
   resolveConfirmation(confirmed: boolean) {
-    this.confirmationResolve?.(confirmed);
-    this.confirmationResolve = null;
-  }
-
-  private waitForConfirmation(actionLabel: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      this.confirmationResolve = resolve;
-      this.emitFull('running', this.step, actionLabel, undefined, undefined, true);
-    });
+    this.confirmationResolver?.(confirmed);
+    this.confirmationResolver = null;
   }
 
   async run(): Promise<void> {
@@ -233,8 +217,7 @@ export class AgentLoop {
     const action = input['action'] as string;
     const reasoning = (input['reasoning'] as string) ?? '';
 
-    const narration = buildNarration({ action, ...input });
-    this.emitFull('running', this.step, action, undefined, reasoning, false, narration);
+    this.emit('running', this.step, action, undefined, reasoning);
 
     if (action === 'done') return true;
     if (action === 'screenshot') {
@@ -244,18 +227,9 @@ export class AgentLoop {
       return false;
     }
 
-    // Verifica se a ação é destrutiva — pausa e aguarda confirmação do usuário
-    const enriched = this.enrichWithNodeInfo(input);
-    if (isDestructive({ action, name: enriched['name'] as string, role: enriched['role'] as string, url: enriched['url'] as string, reasoning })) {
-      const confirmed = await this.waitForConfirmation(narration);
-      if (!confirmed) {
-        this.pushToolResult(toolUse.id!, 'User cancelled this action. Plan an alternative.');
-        return false;
-      }
-    }
-
     // Executa a ação no content script
     // Enriquece com name+role do indexMap para que resolveNode funcione
+    const enriched = this.enrichWithNodeInfo(input);
     const nodeId = this.resolveNodeId(enriched);
     const result = await this.executeAction({ action, input: enriched, nodeId });
 
@@ -426,7 +400,7 @@ export class AgentLoop {
     await this.ensureContentScript();
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), CAPTURE_TIMEOUT_MS);
+      const timer = setTimeout(() => resolve(null), 8000);
 
       chrome.tabs.sendMessage(
         this.tabId,
@@ -452,11 +426,8 @@ export class AgentLoop {
           if (chrome.runtime.lastError || !res) {
             chrome.scripting
               .executeScript({ target: { tabId: this.tabId }, files: ['content/index.js'] })
-              .then(() => setTimeout(resolve, SCRIPT_INJECT_DELAY_MS))
-              .catch((err) => {
-                console.error('[AgentLoop] Falha ao injetar content script:', err);
-                resolve();
-              });
+              .then(() => setTimeout(resolve, 400))
+              .catch(() => resolve());
           } else {
             resolve();
           }
@@ -503,7 +474,7 @@ export class AgentLoop {
   private async executeComputerUseAction(
     cuAction: string,
     cuInput: Record<string, unknown>,
-    snapshotId: string,
+    _snapshotId: string,
   ): Promise<{ success: boolean }> {
     const coordinate = cuInput['coordinate'] as [number, number] | undefined;
     const text = cuInput['text'] as string | undefined;
@@ -536,29 +507,12 @@ export class AgentLoop {
     error?: string,
     lastReasoning?: string,
   ) {
-    this.emitFull(status, step, lastAction, error, lastReasoning, false, lastAction ?? '');
-  }
-
-  private emitFull(
-    status: LoopStatus,
-    step: number,
-    lastAction?: string,
-    error?: string,
-    lastReasoning?: string,
-    isDestructiveAction = false,
-    narration = '',
-  ) {
-    const state: LoopState = { status, step, lastAction, lastReasoning, narration, isDestructive: isDestructiveAction, error };
-    this.onStatusChange(state);
-    broadcast({
-      type: 'AGENT_STATE',
-      payload: state,
-    } as unknown as InternalMessage);
+    this.onStatusChange({ status, step, lastAction, lastReasoning, error });
     broadcast({
       type: 'STATUS_UPDATE',
       payload: {
         status: status === 'running' ? 'running' : status === 'done' ? 'idle' : 'error',
-        message: error ?? narration ?? lastAction ?? '',
+        message: error ?? lastReasoning ?? lastAction ?? '',
       },
     });
   }

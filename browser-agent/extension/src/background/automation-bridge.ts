@@ -91,7 +91,7 @@ export function getAutomationTree(tabId: number): Promise<AccessibilityNode | nu
     try {
       chrome.automation.getTree(tabId, (rootNode) => {
         clearTimeout(timeout);
-        if (chrome.runtime.lastError || !rootNode) {
+        if ((globalThis as { chrome?: { runtime?: { lastError?: unknown } } }).chrome?.runtime?.lastError || !rootNode) {
           resolve(null);
           return;
         }

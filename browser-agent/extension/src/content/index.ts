@@ -1,10 +1,9 @@
 import { captureSnapshot } from './accessibility/tree-builder.js';
 import { resolveNode, getElementCenter } from './accessibility/node-resolver.js';
-import { clickAt, doubleClickAt, rightClickAt, dragFrom } from './actions/click.js';
+import { clickAt, doubleClickAt } from './actions/click.js';
 import { typeText, pressKey, clearField } from './actions/type.js';
 import { scrollBy, scrollElementIntoView } from './actions/scroll.js';
 import { removeCursor } from './overlay/cursor.js';
-import { delay, ACTION_BETWEEN_DELAY_MS, isValidHttpUrl } from '../shared/timing.js';
 import type { InternalMessage, ActionPlan, ActionResult } from '../shared/types.js';
 
 // O tabId é fornecido pelo service worker na primeira mensagem CAPTURE_TREE;
@@ -122,7 +121,7 @@ function getPageElements(): string {
     
     const tagName = el.tagName.toLowerCase();
     const text = el.textContent?.trim().substring(0, 50) || '';
-    const type = el.getAttribute('type') || '';
+    void el.getAttribute('type'); // unused, kept for reference
     const role = el.getAttribute('role') || tagName;
     const ariaLabel = el.getAttribute('aria-label') || '';
     const placeholder = el.getAttribute('placeholder') || '';
@@ -206,13 +205,10 @@ async function executePlan(plan: ActionPlan): Promise<ActionResult[]> {
         }
 
         case 'navigate': {
-          const navUrl = action.params?.url;
-          if (navUrl && isValidHttpUrl(navUrl)) {
-            window.location.href = navUrl;
+          if (action.params?.url) {
+            window.location.href = action.params.url;
             result.success = true;
             result.newSnapshotAvailable = true;
-          } else if (navUrl) {
-            throw new Error(`URL inválida ou protocolo não permitido: ${navUrl}`);
           }
           break;
         }
@@ -258,8 +254,8 @@ async function executePlan(plan: ActionPlan): Promise<ActionResult[]> {
     chrome.runtime.sendMessage({ type: 'ACTION_RESULT', payload: result } as InternalMessage);
     results.push(result);
 
-    if (!result.success) break;
-    await delay(ACTION_BETWEEN_DELAY_MS);
+    if (!result.success) break; // Interrompe em erro
+    await delay(200); // Pausa entre ações
   }
 
   return results;
@@ -319,11 +315,7 @@ async function executeAction(
 
       case 'navigate': {
         const url = input['url'] as string;
-        if (url && isValidHttpUrl(url)) {
-          window.location.href = url;
-        } else if (url) {
-          throw new Error(`URL inválida ou protocolo não permitido: ${url}`);
-        }
+        if (url) window.location.href = url;
         break;
       }
 
@@ -346,3 +338,6 @@ async function executeAction(
   }
 }
 
+function delay(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}

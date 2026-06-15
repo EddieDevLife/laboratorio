@@ -1,18 +1,16 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useAccessibilityTree } from '../hooks/useAccessibilityTree';
 import { useMouseControl } from '../hooks/useMouseControl';
 import '../styles/AccessibilityDemo.css';
 
 export function AccessibilityDemo() {
   const {
-    tree,
     focusableElements,
     captureTree,
     findElementByLabel,
-    findElementByRole,
     getElementCenter,
-    navigateByTab,
     activateElement,
+    navigateByTab,
   } = useAccessibilityTree();
 
   const {
