@@ -3,11 +3,11 @@
 ## Frontend Web (React)
 
 ### Captura de DOM e Accessibility Tree
-- [ ] Componente para capturar estrutura DOM
-- [ ] Leitor de Accessibility Tree
-- [ ] Serialização de DOM em JSON
-- [ ] Identificação de elementos interativos
-- [ ] Extração de atributos ARIA
+- [x] Componente para capturar estrutura DOM (`DOMCapturePanel.tsx`)
+- [x] Leitor de Accessibility Tree (árvore hierárquica interativa com expand/collapse)
+- [x] Serialização de DOM em JSON (`useDOMCapture.serializeToJSON` + download + copy)
+- [x] Identificação de elementos interativos (tag, role, tabindex, handler, editable, draggable)
+- [x] Extração de atributos ARIA (todos os `aria-*` com tipagem e conversão de tipos)
 
 ### Captura de Screenshots
 - [ ] Integração com html2canvas
