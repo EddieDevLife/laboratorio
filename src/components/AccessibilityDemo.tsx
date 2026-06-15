@@ -71,27 +71,28 @@ export function AccessibilityDemo() {
   };
 
   /**
-   * Executa uma sequência de comandos
+   * Executa uma sequência de comandos em todos os elementos detectados
    */
   const handleExecuteSequence = async () => {
+    if (focusableElements.length === 0) {
+      const { focusable } = captureTree();
+      if (focusable.length === 0) return;
+    }
+
     setIsRunning(true);
     createVisualCursor();
 
-    // Exemplo: encontrar e clicar em um botão, depois em um input
-    const button = findElementByRole('button', 0);
-    const input = findElementByRole('textbox', 0);
+    const commands = [];
+    // Limitar a 15 elementos para não demorar demais, ou todos se forem poucos
+    const targets = focusableElements.slice(0, 15);
 
-    if (button && input) {
-      const buttonCenter = getElementCenter(button);
-      const inputCenter = getElementCenter(input);
-
-      await executeCommands([
-        { type: 'move', x: buttonCenter.x, y: buttonCenter.y, duration: 500 },
-        { type: 'click', x: buttonCenter.x, y: buttonCenter.y },
-        { type: 'move', x: inputCenter.x, y: inputCenter.y, duration: 500 },
-        { type: 'click', x: inputCenter.x, y: inputCenter.y },
-      ]);
+    for (const element of targets) {
+      const center = getElementCenter(element);
+      commands.push({ type: 'move' as const, x: center.x, y: center.y, duration: 400 });
+      commands.push({ type: 'click' as const, x: center.x, y: center.y });
     }
+
+    await executeCommands(commands);
 
     setIsRunning(false);
   };

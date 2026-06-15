@@ -92,7 +92,7 @@ export function useMouseControl() {
   }, [createVisualCursor]);
 
   /**
-   * Simula um clique do mouse
+   * Simula um clique do mouse garantindo foco e interação real
    */
   const click = useCallback(async (
     x: number,
@@ -106,33 +106,37 @@ export function useMouseControl() {
     const element = document.elementFromPoint(x, y) as HTMLElement;
     
     if (element) {
+      // Garantir foco para simular interação real
+      element.focus();
+
       // Criar e disparar evento de mouse
       const buttonCode = button === 'left' ? 0 : button === 'right' ? 2 : 1;
       
-      const mouseDownEvent = new MouseEvent('mousedown', {
+      const eventOptions = {
         bubbles: true,
         cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
         buttons: 1 << buttonCode,
-      });
-      
-      const mouseUpEvent = new MouseEvent('mouseup', {
-        bubbles: true,
-        cancelable: true,
-      });
-      
-      const clickEvent = new MouseEvent('click', {
-        bubbles: true,
-        cancelable: true,
-      });
+        button: buttonCode,
+      };
 
-      element.dispatchEvent(mouseDownEvent);
+      element.dispatchEvent(new MouseEvent('mousedown', eventOptions));
       await new Promise(resolve => setTimeout(resolve, 50));
-      element.dispatchEvent(mouseUpEvent);
+      element.dispatchEvent(new MouseEvent('mouseup', eventOptions));
       await new Promise(resolve => setTimeout(resolve, 50));
-      element.dispatchEvent(clickEvent);
+      element.dispatchEvent(new MouseEvent('click', eventOptions));
 
-      // Se for um link ou botão, também chamar click()
-      if (element instanceof HTMLAnchorElement || element instanceof HTMLButtonElement) {
+      // Se for um input, dar foco explicitamente e selecionar se possível
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+        element.focus();
+        if (element.type === 'text' || element.type === 'email' || element.type === 'password') {
+          element.select();
+        }
+      } 
+      // Se for um link ou botão, chamar click() nativo também
+      else if (element instanceof HTMLAnchorElement || element instanceof HTMLButtonElement) {
         element.click();
       }
     }
@@ -244,6 +248,17 @@ export function useMouseControl() {
     }
   }, []);
 
+  /**
+   * Obtém a posição atual do cursor visual
+   */
+  const getCursorPosition = useCallback((): { x: number; y: number } => {
+    if (!cursorRef.current) return { x: 0, y: 0 };
+    return {
+      x: parseFloat(cursorRef.current.style.left) + 10,
+      y: parseFloat(cursorRef.current.style.top) + 10,
+    };
+  }, []);
+
   return {
     moveCursor,
     click,
@@ -254,5 +269,6 @@ export function useMouseControl() {
     createVisualCursor,
     hideCursor,
     removeCursor,
+    getCursorPosition,
   };
 }
