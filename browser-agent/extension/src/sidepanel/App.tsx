@@ -13,6 +13,7 @@ import { ConfirmationModal } from './ConfirmationModal.js';
 import { useAnnouncer } from './hooks/useAnnouncer.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { speak } from './tts/index.js';
+import { PROVIDERS } from '../background/llm-client.js';
 import type { Provider, StoredSettings } from '../background/llm-client.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -33,11 +34,6 @@ export default function App() {
 
   const [settings, setSettings] = useState<StoredSettings>({
     llm_provider: 'gemini',
-    anthropic_api_key: '',
-    openai_api_key: '',
-    gemini_api_key: '',
-    openai_model: 'gpt-4o',
-    gemini_model: 'gemini-2.0-flash',
   });
   const [settingsSaved, setSettingsSaved] = useState(false);
 
@@ -72,10 +68,11 @@ export default function App() {
   // ── Load settings on mount ────────────────────────────────────────────────
 
   useEffect(() => {
-    chrome.storage.local.get([
-      'llm_provider', 'anthropic_api_key', 'openai_api_key',
-      'gemini_api_key', 'openai_model', 'gemini_model',
-    ], (result) => {
+    const keys = [
+      'llm_provider', 'custom_name', 'custom_base_url',
+      ...PROVIDERS.flatMap((p) => [`${p.id}_api_key`, `${p.id}_model`]),
+    ];
+    chrome.storage.local.get(keys, (result) => {
       setSettings((prev) => ({ ...prev, ...result } as StoredSettings));
     });
   }, []);
@@ -246,11 +243,11 @@ export default function App() {
   }, [settings]);
 
   function activeApiKey(): string {
-    if (settings.llm_provider === 'anthropic') return settings.anthropic_api_key ?? '';
-    if (settings.llm_provider === 'openai') return settings.openai_api_key ?? '';
-    if (settings.llm_provider === 'gemini') return settings.gemini_api_key ?? '';
-    return '';
+    const id = settings.llm_provider ?? 'openai';
+    return (settings[`${id}_api_key`] as string | undefined) ?? '';
   }
+
+  const activeProviderDef = PROVIDERS.find((p) => p.id === (settings.llm_provider ?? 'openai'));
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
 
@@ -299,58 +296,74 @@ export default function App() {
         <div className="settings-panel" style={{ padding: 12, borderBottom: '1px solid #333', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <h3 style={{ margin: 0, fontSize: 13 }}>Configurações de LLM</h3>
 
+          {/* Provider selector */}
           <label style={{ fontSize: 12 }}>
-            Provider
+            Provedor
             <select
               value={settings.llm_provider ?? 'gemini'}
               onChange={(e) => setSettings((s) => ({ ...s, llm_provider: e.target.value as Provider }))}
               style={{ width: '100%', marginTop: 4 }}
             >
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="openai">OpenAI (GPT-4o)</option>
-              <option value="gemini">Google Gemini</option>
+              {PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
             </select>
           </label>
 
-          {settings.llm_provider === 'anthropic' && (
+          {/* Custom provider: name + base URL */}
+          {settings.llm_provider === 'custom' && (
+            <>
+              <label style={{ fontSize: 12 }}>
+                Nome do provedor
+                <input type="text" placeholder="Ex: Ollama, LM Studio, Together AI..."
+                  value={settings.custom_name ?? ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, custom_name: e.target.value }))}
+                  style={{ width: '100%', marginTop: 4 }} />
+              </label>
+              <label style={{ fontSize: 12 }}>
+                URL base (OpenAI-compatível)
+                <input type="text" placeholder="https://api.example.com/v1"
+                  value={settings.custom_base_url ?? ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, custom_base_url: e.target.value }))}
+                  style={{ width: '100%', marginTop: 4 }} />
+              </label>
+            </>
+          )}
+
+          {/* API Key — dinâmica por provedor */}
+          {activeProviderDef && (
             <label style={{ fontSize: 12 }}>
-              Anthropic API Key
-              <input type="password" placeholder="sk-ant-..." value={settings.anthropic_api_key ?? ''}
-                onChange={(e) => setSettings((s) => ({ ...s, anthropic_api_key: e.target.value }))}
-                style={{ width: '100%', marginTop: 4 }} />
+              {activeProviderDef.id === 'custom'
+                ? 'API Key'
+                : `${activeProviderDef.name} API Key`}
+              <input
+                type="password"
+                placeholder={activeProviderDef.apiKeyPlaceholder}
+                value={(settings[`${activeProviderDef.id}_api_key`] as string | undefined) ?? ''}
+                onChange={(e) => setSettings((s) => ({
+                  ...s,
+                  [`${activeProviderDef.id}_api_key`]: e.target.value,
+                }))}
+                style={{ width: '100%', marginTop: 4 }}
+              />
             </label>
           )}
-          {settings.llm_provider === 'openai' && (
-            <>
-              <label style={{ fontSize: 12 }}>
-                OpenAI API Key
-                <input type="password" placeholder="sk-..." value={settings.openai_api_key ?? ''}
-                  onChange={(e) => setSettings((s) => ({ ...s, openai_api_key: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }} />
-              </label>
-              <label style={{ fontSize: 12 }}>
-                Modelo (opcional)
-                <input type="text" placeholder="gpt-4o" value={settings.openai_model ?? ''}
-                  onChange={(e) => setSettings((s) => ({ ...s, openai_model: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }} />
-              </label>
-            </>
-          )}
-          {settings.llm_provider === 'gemini' && (
-            <>
-              <label style={{ fontSize: 12 }}>
-                Gemini API Key
-                <input type="password" placeholder="AIzaSy..." value={settings.gemini_api_key ?? ''}
-                  onChange={(e) => setSettings((s) => ({ ...s, gemini_api_key: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }} />
-              </label>
-              <label style={{ fontSize: 12 }}>
-                Modelo (opcional)
-                <input type="text" placeholder="gemini-2.0-flash" value={settings.gemini_model ?? ''}
-                  onChange={(e) => setSettings((s) => ({ ...s, gemini_model: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }} />
-              </label>
-            </>
+
+          {/* Model override */}
+          {activeProviderDef && (
+            <label style={{ fontSize: 12 }}>
+              Modelo{activeProviderDef.defaultModel ? ` (padrão: ${activeProviderDef.defaultModel})` : ''}
+              <input
+                type="text"
+                placeholder={activeProviderDef.defaultModel || 'nome-do-modelo'}
+                value={(settings[`${activeProviderDef.id}_model`] as string | undefined) ?? ''}
+                onChange={(e) => setSettings((s) => ({
+                  ...s,
+                  [`${activeProviderDef.id}_model`]: e.target.value,
+                }))}
+                style={{ width: '100%', marginTop: 4 }}
+              />
+            </label>
           )}
 
           <button onClick={saveSettings} style={{ alignSelf: 'flex-start', marginTop: 4 }}>

@@ -1,19 +1,88 @@
 /**
- * Cliente LLM unificado — chama Anthropic, OpenAI ou Gemini
- * diretamente do service worker, sem backend.
+ * Cliente LLM unificado — chama OpenAI, Gemini ou qualquer provedor
+ * compatível com OpenAI diretamente do service worker, sem backend.
  *
  * Configuração em chrome.storage.local:
- *   llm_provider   : 'anthropic' | 'openai' | 'gemini'
- *   anthropic_api_key
- *   openai_api_key
- *   gemini_api_key
- *   openai_model   (opcional, default: gpt-4o)
- *   gemini_model   (opcional, default: gemini-2.0-flash)
+ *   llm_provider          : id do provedor (ex: 'openai', 'gemini', 'custom')
+ *   {id}_api_key          : chave de API do provedor
+ *   {id}_model            : modelo (opcional, usa o padrão do provedor)
+ *   custom_name           : nome exibido para provedor personalizado
+ *   custom_base_url       : URL base OpenAI-compatível para provedor personalizado
  */
+
+// ── Provedores predefinidos ────────────────────────────────────────────────────
+
+export interface ProviderDef {
+  id: string;
+  name: string;
+  baseUrl: string;          // vazio para Gemini (tem formato próprio) e custom
+  defaultModel: string;
+  apiKeyPlaceholder: string;
+  openAICompat: boolean;    // false = usa API nativa Gemini
+}
+
+export const PROVIDERS: ProviderDef[] = [
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o',
+    apiKeyPlaceholder: 'sk-...',
+    openAICompat: true,
+  },
+  {
+    id: 'gemini',
+    name: 'Google Gemini',
+    baseUrl: '',
+    defaultModel: 'gemini-2.0-flash',
+    apiKeyPlaceholder: 'AIzaSy...',
+    openAICompat: false,
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral AI',
+    baseUrl: 'https://api.mistral.ai/v1',
+    defaultModel: 'mistral-large-latest',
+    apiKeyPlaceholder: 'seu-api-key',
+    openAICompat: true,
+  },
+  {
+    id: 'groq',
+    name: 'Groq',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    defaultModel: 'llama-3.3-70b-versatile',
+    apiKeyPlaceholder: 'gsk_...',
+    openAICompat: true,
+  },
+  {
+    id: 'together',
+    name: 'Together AI',
+    baseUrl: 'https://api.together.xyz/v1',
+    defaultModel: 'meta-llama/Llama-3-70b-chat-hf',
+    apiKeyPlaceholder: 'seu-api-key',
+    openAICompat: true,
+  },
+  {
+    id: 'perplexity',
+    name: 'Perplexity',
+    baseUrl: 'https://api.perplexity.ai',
+    defaultModel: 'sonar-pro',
+    apiKeyPlaceholder: 'pplx-...',
+    openAICompat: true,
+  },
+  {
+    id: 'custom',
+    name: 'Personalizado',
+    baseUrl: '',
+    defaultModel: '',
+    apiKeyPlaceholder: 'seu-api-key',
+    openAICompat: true,
+  },
+];
 
 // ── Tipos públicos ─────────────────────────────────────────────────────────────
 
-export type Provider = 'anthropic' | 'openai' | 'gemini';
+export type Provider = string;  // id de qualquer provedor acima
 
 export interface Message {
   role: 'user' | 'assistant';
@@ -34,9 +103,9 @@ export interface ContentBlock {
 export interface Tool {
   name: string;
   description?: string;
-  input_schema?: unknown;   // Anthropic format
-  parameters?: unknown;     // OpenAI/Gemini format (auto-converted)
-  type?: string;            // 'computer_20250124' for Anthropic Computer Use
+  input_schema?: unknown;   // formato Anthropic (convertido internamente)
+  parameters?: unknown;     // formato OpenAI/Gemini
+  type?: string;
   display_width_px?: number;
   display_height_px?: number;
 }
@@ -45,7 +114,7 @@ export interface LLMResponse {
   content: ContentBlock[];
   stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop';
   usage?: { input_tokens?: number; output_tokens?: number };
-  provider: Provider;
+  provider: string;
 }
 
 export interface LLMConfig {
@@ -53,115 +122,82 @@ export interface LLMConfig {
   system?: string;
   tools?: Tool[];
   maxTokens?: number;
-  useComputerUseBeta?: boolean;  // Anthropic-only: computer use beta
+  useComputerUseBeta?: boolean;  // ignorado (era exclusivo Anthropic)
 }
 
-// ── Configuração ───────────────────────────────────────────────────────────────
+// ── Configuração em storage ────────────────────────────────────────────────────
 
 export interface StoredSettings {
-  llm_provider?: Provider;
-  anthropic_api_key?: string;
-  openai_api_key?: string;
-  gemini_api_key?: string;
-  openai_model?: string;
-  gemini_model?: string;
+  llm_provider?: string;
+  custom_name?: string;
+  custom_base_url?: string;
+  [key: string]: string | undefined;   // {id}_api_key, {id}_model
 }
 
+const ALL_STORAGE_KEYS: string[] = [
+  'llm_provider',
+  'custom_name',
+  'custom_base_url',
+  ...PROVIDERS.flatMap((p) => [`${p.id}_api_key`, `${p.id}_model`]),
+];
+
 export async function getSettings(): Promise<StoredSettings> {
-  return chrome.storage.local.get([
-    'llm_provider',
-    'anthropic_api_key',
-    'openai_api_key',
-    'gemini_api_key',
-    'openai_model',
-    'gemini_model',
-  ]) as Promise<StoredSettings>;
+  return chrome.storage.local.get(ALL_STORAGE_KEYS) as Promise<StoredSettings>;
 }
 
 export async function saveSettings(settings: Partial<StoredSettings>): Promise<void> {
   return chrome.storage.local.set(settings);
 }
 
+// ── Helpers de settings ───────────────────────────────────────────────────────
+
+function providerApiKey(settings: StoredSettings, id: string): string {
+  return settings[`${id}_api_key`] ?? '';
+}
+
+function providerModel(settings: StoredSettings, provDef: ProviderDef): string {
+  return settings[`${provDef.id}_model`] || provDef.defaultModel;
+}
+
 // ── Entry point unificado ─────────────────────────────────────────────────────
 
 export async function callLLM(opts: LLMConfig): Promise<LLMResponse> {
   const settings = await getSettings();
-  const provider: Provider = settings.llm_provider ?? 'anthropic';
+  const providerId = settings.llm_provider ?? 'openai';
+  const provDef = PROVIDERS.find((p) => p.id === providerId);
 
-  switch (provider) {
-    case 'anthropic': return callAnthropic(opts, settings);
-    case 'openai':    return callOpenAI(opts, settings);
-    case 'gemini':    return callGemini(opts, settings);
-    default:          throw new Error(`Provider desconhecido: ${provider}`);
-  }
+  if (!provDef) throw new Error(`Provedor desconhecido: ${providerId}`);
+
+  if (provDef.id === 'gemini') return callGemini(opts, settings, provDef);
+
+  // OpenAI-compatível (openai, mistral, groq, together, perplexity, custom)
+  const baseUrl = provDef.id === 'custom'
+    ? (settings.custom_base_url ?? '').replace(/\/$/, '')
+    : provDef.baseUrl;
+
+  if (!baseUrl) throw new Error(`URL base não configurada para "${provDef.name}".`);
+
+  const apiKey = providerApiKey(settings, provDef.id);
+  if (!apiKey) throw new Error(`API key não configurada para "${provDef.name}".`);
+
+  const model = providerModel(settings, provDef);
+  if (!model) throw new Error(`Modelo não configurado para "${provDef.name}".`);
+
+  return callOpenAICompat(opts, apiKey, baseUrl, model, provDef.id);
 }
 
 // Mantém compatibilidade com agent-loop.ts que importa callClaude
 export const callClaude = callLLM;
 
-// ── Anthropic ─────────────────────────────────────────────────────────────────
+// ── OpenAI-compatível (OpenAI, Mistral, Groq, Together, Perplexity, Custom) ──
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_MODEL_DEFAULT = 'claude-sonnet-4-6';
-const ANTHROPIC_COMPUTER_USE_MODEL = 'claude-opus-4-8';
-const ANTHROPIC_COMPUTER_USE_BETA = 'computer-use-2025-01-24';
-
-async function callAnthropic(opts: LLMConfig, settings: StoredSettings): Promise<LLMResponse> {
-  const apiKey = settings.anthropic_api_key ?? '';
-  if (!apiKey) throw new Error('Anthropic API key não configurada.');
-
-  const model = opts.useComputerUseBeta ? ANTHROPIC_COMPUTER_USE_MODEL : ANTHROPIC_MODEL_DEFAULT;
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-  };
-  if (opts.useComputerUseBeta) {
-    headers['anthropic-beta'] = ANTHROPIC_COMPUTER_USE_BETA;
-  }
-
-  const body: Record<string, unknown> = {
-    model,
-    max_tokens: opts.maxTokens ?? 4096,
-    messages: opts.messages,
-  };
-  if (opts.system) body['system'] = opts.system;
-  if (opts.tools?.length) body['tools'] = opts.tools;
-
-  const res = await fetch(ANTHROPIC_API, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
-
-  const data = await res.json() as {
-    content: ContentBlock[];
-    stop_reason: string;
-    usage: { input_tokens: number; output_tokens: number };
-  };
-
-  return {
-    content: data.content,
-    stop_reason: data.stop_reason as LLMResponse['stop_reason'],
-    usage: data.usage,
-    provider: 'anthropic',
-  };
-}
-
-// ── OpenAI ────────────────────────────────────────────────────────────────────
-
-const OPENAI_API = 'https://api.openai.com/v1/chat/completions';
-
-async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LLMResponse> {
-  const apiKey = settings.openai_api_key ?? '';
-  if (!apiKey) throw new Error('OpenAI API key não configurada.');
-
-  const model = settings.openai_model ?? 'gpt-4o';
-
-  // Converte mensagens para o formato OpenAI
+async function callOpenAICompat(
+  opts: LLMConfig,
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+  providerId: string,
+): Promise<LLMResponse> {
   const messages = [];
   if (opts.system) messages.push({ role: 'system', content: opts.system });
   for (const msg of opts.messages) {
@@ -173,8 +209,7 @@ async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LL
     });
   }
 
-  // Converte tools para o formato OpenAI
-  const tools = opts.tools?.map(t => ({
+  const tools = opts.tools?.map((t) => ({
     type: 'function',
     function: {
       name: t.name,
@@ -193,7 +228,7 @@ async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LL
     body['tool_choice'] = 'auto';
   }
 
-  const res = await fetch(OPENAI_API, {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -202,7 +237,7 @@ async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LL
     body: JSON.stringify(body),
   });
 
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`${providerId} ${res.status}: ${await res.text()}`);
 
   const data = await res.json() as {
     choices: Array<{
@@ -224,13 +259,8 @@ async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LL
 
   for (const tc of choice.message.tool_calls ?? []) {
     let parsedInput: unknown = {};
-    try { parsedInput = JSON.parse(tc.function.arguments); } catch {}
-    content.push({
-      type: 'tool_use',
-      id: tc.id,
-      name: tc.function.name,
-      input: parsedInput,
-    });
+    try { parsedInput = JSON.parse(tc.function.arguments); } catch { /* mantém {} */ }
+    content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: parsedInput });
   }
 
   const stop = choice.finish_reason === 'tool_calls' ? 'tool_use'
@@ -241,12 +271,12 @@ async function callOpenAI(opts: LLMConfig, settings: StoredSettings): Promise<LL
     content,
     stop_reason: stop,
     usage: { input_tokens: data.usage.prompt_tokens, output_tokens: data.usage.completion_tokens },
-    provider: 'openai',
+    provider: providerId,
   };
 }
 
 function convertContentToOpenAI(blocks: ContentBlock[]): unknown[] {
-  return blocks.map(b => {
+  return blocks.map((b) => {
     if (b.type === 'text') return { type: 'text', text: b.text };
     if (b.type === 'image' && b.source) {
       return {
@@ -263,14 +293,17 @@ function convertContentToOpenAI(blocks: ContentBlock[]): unknown[] {
 
 // ── Gemini ────────────────────────────────────────────────────────────────────
 
-async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LLMResponse> {
-  const apiKey = settings.gemini_api_key ?? '';
+async function callGemini(
+  opts: LLMConfig,
+  settings: StoredSettings,
+  provDef: ProviderDef,
+): Promise<LLMResponse> {
+  const apiKey = providerApiKey(settings, 'gemini');
   if (!apiKey) throw new Error('Gemini API key não configurada.');
 
-  const model = settings.gemini_model ?? 'gemini-2.0-flash';
+  const model = providerModel(settings, provDef);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  // Converte mensagens para o formato Gemini
   const contents = [];
   for (const msg of opts.messages) {
     const parts = typeof msg.content === 'string'
@@ -279,10 +312,9 @@ async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LL
     contents.push({ role: msg.role === 'assistant' ? 'model' : 'user', parts });
   }
 
-  // Converte tools para o formato Gemini
   const functionDeclarations = opts.tools
-    ?.filter(t => !t.type)  // ignora computer use tools
-    .map(t => ({
+    ?.filter((t) => !t.type)
+    .map((t) => ({
       name: t.name,
       description: t.description ?? '',
       parameters: t.parameters ?? t.input_schema ?? { type: 'object', properties: {} },
@@ -290,14 +322,10 @@ async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LL
 
   const body: Record<string, unknown> = {
     contents,
-    generationConfig: {
-      maxOutputTokens: opts.maxTokens ?? 4096,
-    },
+    generationConfig: { maxOutputTokens: opts.maxTokens ?? 4096 },
   };
 
-  if (opts.system) {
-    body['systemInstruction'] = { parts: [{ text: opts.system }] };
-  }
+  if (opts.system) body['systemInstruction'] = { parts: [{ text: opts.system }] };
 
   if (functionDeclarations?.length) {
     body['tools'] = [{ functionDeclarations }];
@@ -324,9 +352,7 @@ async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LL
   const content: ContentBlock[] = [];
 
   for (const part of candidate.content.parts) {
-    if (part.text) {
-      content.push({ type: 'text', text: part.text });
-    }
+    if (part.text) content.push({ type: 'text', text: part.text });
     if (part.functionCall) {
       content.push({
         type: 'tool_use',
@@ -337,10 +363,9 @@ async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LL
     }
   }
 
-  const finishReason = candidate.finishReason;
   const stop: LLMResponse['stop_reason'] =
-    content.some(b => b.type === 'tool_use') ? 'tool_use'
-    : finishReason === 'MAX_TOKENS' ? 'max_tokens'
+    content.some((b) => b.type === 'tool_use') ? 'tool_use'
+    : candidate.finishReason === 'MAX_TOKENS' ? 'max_tokens'
     : 'end_turn';
 
   return {
@@ -355,15 +380,10 @@ async function callGemini(opts: LLMConfig, settings: StoredSettings): Promise<LL
 }
 
 function convertContentToGemini(blocks: ContentBlock[]): unknown[] {
-  return blocks.map(b => {
+  return blocks.map((b) => {
     if (b.type === 'text') return { text: b.text };
     if (b.type === 'image' && b.source) {
-      return {
-        inlineData: {
-          mimeType: b.source.media_type,
-          data: b.source.data,
-        },
-      };
+      return { inlineData: { mimeType: b.source.media_type, data: b.source.data } };
     }
     if (b.type === 'tool_result') {
       return {
@@ -377,12 +397,10 @@ function convertContentToGemini(blocks: ContentBlock[]): unknown[] {
   });
 }
 
-// Re-export getApiKey para compatibilidade com código anterior
+// ── Compatibilidade retroativa ────────────────────────────────────────────────
+
 export async function getApiKey(): Promise<string> {
   const s = await getSettings();
-  const provider = s.llm_provider ?? 'anthropic';
-  if (provider === 'anthropic') return s.anthropic_api_key ?? '';
-  if (provider === 'openai') return s.openai_api_key ?? '';
-  if (provider === 'gemini') return s.gemini_api_key ?? '';
-  return '';
+  const id = s.llm_provider ?? 'openai';
+  return providerApiKey(s, id);
 }

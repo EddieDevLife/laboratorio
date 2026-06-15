@@ -11,7 +11,7 @@
  *   6. Repete até "done" ou limite
  */
 
-import { callClaude, getSettings, type Message, type Tool } from './llm-client.js';
+import { callClaude, type Message, type Tool } from './llm-client.js';
 import type { InternalMessage, AccessibilityNode, PageSnapshot } from '../shared/types.js';
 
 const MAX_STEPS = 30;
@@ -44,10 +44,6 @@ const BROWSER_ACTION_TOOL: Tool = {
     required: ['action', 'reasoning'],
   },
 };
-
-function makeComputerTool(w: number, h: number): Tool {
-  return { type: 'computer_20250124', name: 'computer', display_width_px: w, display_height_px: h };
-}
 
 // ── AX tree → [index] text (browser-use format) ───────────────────────────────
 
@@ -249,118 +245,58 @@ export class AgentLoop {
   private async stepComputerUse(snapshot: PageSnapshot): Promise<boolean> {
     this.emit('running', this.step, 'computer_use', undefined, 'Usando visão (muitas falhas consecutivas)');
 
-    // Computer Use nativo só funciona com Anthropic.
-    // Para outros providers, usa visão com GPT-4o / Gemini via descrição da página.
-    const settings = await getSettings();
-    const isAnthropic = (settings.llm_provider ?? 'anthropic') === 'anthropic';
-
+    // Fallback visual: envia screenshot como contexto e pede ação via browser_action
     const screenshot = await this.takeScreenshot();
     if (!screenshot) {
-      // Sem screenshot, reseta falhas e tenta de novo com AX tree
       this.consecutiveFailures = 0;
       return false;
     }
 
-    const w = snapshot.viewportWidth || 1280;
-    const h = snapshot.viewportHeight || 800;
-
-    if (!isAnthropic) {
-      // Fallback para providers sem Computer Use: envia screenshot como contexto visual
-      // e pede uma ação em texto usando o mesmo tool browser_action
-      const userMsg: Message = {
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshot } },
-          {
-            type: 'text',
-            text: [
-              `You are a browser automation agent. The screenshot shows the current page.`,
-              `Objective: ${this.objective}`,
-              `URL: ${snapshot.url}`,
-              ``,
-              `IMPORTANT: You MUST call the browser_action tool NOW. Do NOT describe steps. Take ONE concrete action.`,
-              `If the objective requires navigating to another site, use action="navigate" with the URL.`,
-              ``,
-              `Available page elements:`,
-              this.lastPageText?.substring(0, 3000) ?? '(see screenshot)',
-            ].join('\n'),
-          },
-        ],
-      };
-
-      const response = await callClaude({
-        system: SYSTEM_PROMPT,
-        messages: [userMsg],
-        tools: [BROWSER_ACTION_TOOL],
-        maxTokens: 1024,
-      });
-
-      // Processa como se fosse um step normal da AX tree
-      const toolUse = response.content.find(b => b.type === 'tool_use' && b.name === 'browser_action');
-      if (!toolUse) {
-        // Modelo retornou texto sem tool — força navigate se houver URL no objetivo
-        const urlMatch = this.objective.match(/https?:\/\/\S+|google\.com|youtube\.com/i);
-        if (urlMatch) {
-          await this.executeAction({ action: 'navigate', input: { url: `https://${urlMatch[0].replace(/^https?:\/\//, '')}` } });
-        }
-        this.consecutiveFailures = 0;
-        return false;
-      }
-
-      const input = toolUse.input as Record<string, unknown>;
-      const action = input['action'] as string;
-      if (action === 'done') return true;
-
-      const enriched = this.enrichWithNodeInfo(input);
-      const result = await this.executeAction({ action, input: enriched });
-      if (result.success) this.consecutiveFailures = 0;
-      return false;
-    }
-
-    // Anthropic Computer Use
     const userMsg: Message = {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshot } },
-        { type: 'text', text: `Objective: ${this.objective}\nURL: ${snapshot.url}\n\nWhat is the next action?` },
+        {
+          type: 'text',
+          text: [
+            `You are a browser automation agent. The screenshot shows the current page.`,
+            `Objective: ${this.objective}`,
+            `URL: ${snapshot.url}`,
+            ``,
+            `IMPORTANT: You MUST call the browser_action tool NOW. Do NOT describe steps. Take ONE concrete action.`,
+            `If the objective requires navigating to another site, use action="navigate" with the URL.`,
+            ``,
+            `Available page elements:`,
+            this.lastPageText?.substring(0, 3000) ?? '(see screenshot)',
+          ].join('\n'),
+        },
       ],
     };
 
     const response = await callClaude({
-      system: COMPUTER_USE_SYSTEM,
+      system: SYSTEM_PROMPT,
       messages: [userMsg],
-      tools: [makeComputerTool(w, h)],
-      maxTokens: 4096,
-      useComputerUseBeta: true,
+      tools: [BROWSER_ACTION_TOOL],
+      maxTokens: 1024,
     });
 
-    const toolUse = response.content.find(b => b.type === 'tool_use' && b.name === 'computer');
-    const textBlock = response.content.find(b => b.type === 'text');
-
+    const toolUse = response.content.find(b => b.type === 'tool_use' && b.name === 'browser_action');
     if (!toolUse) {
-      // Sem tool call — Claude disse que terminou
-      const summary = (textBlock?.text ?? 'Concluído via Computer Use').substring(0, 200);
-      this.emit('running', this.step, 'done', undefined, summary);
-      return true;
-    }
-
-    const cuInput = toolUse.input as Record<string, unknown>;
-    const cuAction = cuInput['action'] as string;
-
-    if (cuAction === 'screenshot') {
-      // Claude pediu outro screenshot — deixa continuar o loop
+      const urlMatch = this.objective.match(/https?:\/\/\S+|google\.com|youtube\.com/i);
+      if (urlMatch) {
+        await this.executeAction({ action: 'navigate', input: { url: `https://${urlMatch[0].replace(/^https?:\/\//, '')}` } });
+      }
+      this.consecutiveFailures = 0;
       return false;
     }
 
-    // Converte ação do Computer Use para o nosso executor
-    const result = await this.executeComputerUseAction(cuAction, cuInput, snapshot.snapshotId);
+    const input = toolUse.input as Record<string, unknown>;
+    const action = input['action'] as string;
+    if (action === 'done') return true;
 
-    if (result.success) {
-      this.consecutiveFailures = 0;
-    }
-    // Não incrementamos falhas do computer use (usa coordenadas absolutas)
-
-    if (cuAction === 'done' || response.stop_reason === 'end_turn') return true;
+    const enriched = this.enrichWithNodeInfo(input);
+    const result = await this.executeAction({ action, input: enriched });
+    if (result.success) this.consecutiveFailures = 0;
     return false;
   }
 
@@ -471,35 +407,6 @@ export class AgentLoop {
     });
   }
 
-  private async executeComputerUseAction(
-    cuAction: string,
-    cuInput: Record<string, unknown>,
-    _snapshotId: string,
-  ): Promise<{ success: boolean }> {
-    const coordinate = cuInput['coordinate'] as [number, number] | undefined;
-    const text = cuInput['text'] as string | undefined;
-    const key = cuInput['key'] as string | undefined;
-    const direction = cuInput['direction'] as string | undefined;
-    const amount = (cuInput['amount'] as number) ?? 3;
-
-    let payload: Record<string, unknown> = { action: cuAction };
-
-    if (coordinate) {
-      payload = { action: 'click_coordinate', x: coordinate[0], y: coordinate[1] };
-      if (cuAction === 'double_click') payload['double'] = true;
-      if (cuAction === 'right_click') payload['button'] = 'right';
-    } else if (text) {
-      payload = { action: 'type', text };
-    } else if (key) {
-      payload = { action: 'press_key', key };
-    } else if (direction) {
-      const deltaY = direction === 'down' ? amount * 100 : direction === 'up' ? -(amount * 100) : 0;
-      payload = { action: 'scroll', deltaY };
-    }
-
-    return this.executeAction({ action: payload['action'] as string, input: payload });
-  }
-
   private emit(
     status: LoopStatus,
     step: number,
@@ -540,8 +447,3 @@ Rules:
 - Always include clear "reasoning".
 `;
 
-const COMPUTER_USE_SYSTEM = `\
-You are a browser automation agent controlling a real Chrome browser via screenshot.
-Use the computer tool to click, type, scroll, and navigate.
-When the task is complete, respond with text "Task complete: <summary>" without using any tool.
-`;
