@@ -57,11 +57,15 @@ export default function App() {
         setActiveTab({ url: tab.url, title: tab.title, id: tab.id });
       }
     }
+    function onUpdated(_id: number, info: chrome.tabs.TabChangeInfo) {
+      if (info.status === 'complete') refreshTab();
+    }
     refreshTab();
     chrome.tabs.onActivated.addListener(refreshTab);
-    chrome.tabs.onUpdated.addListener((_id, info) => { if (info.status === 'complete') refreshTab(); });
+    chrome.tabs.onUpdated.addListener(onUpdated);
     return () => {
       chrome.tabs.onActivated.removeListener(refreshTab);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
     };
   }, []);
 

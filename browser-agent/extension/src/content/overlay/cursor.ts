@@ -2,6 +2,10 @@
 let cursorEl: HTMLDivElement | null = null;
 
 export function createCursor(): void {
+  // Remove cursor anterior órfão (caso o script tenha sido re-injetado)
+  const orphan = document.getElementById('__browser_agent_cursor__');
+  if (orphan && orphan !== cursorEl) orphan.remove();
+
   if (cursorEl) return;
 
   cursorEl = document.createElement('div');

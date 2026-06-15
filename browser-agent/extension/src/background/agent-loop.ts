@@ -15,6 +15,7 @@ import { callClaude, getSettings, type Message, type ContentBlock, type Tool } f
 import type { InternalMessage, AccessibilityNode, PageSnapshot } from '../shared/types.js';
 import { buildNarration } from './narration.js';
 import { isDestructive } from './destructive-detector.js';
+import { CAPTURE_TIMEOUT_MS, SCRIPT_INJECT_DELAY_MS } from '../shared/timing.js';
 
 const MAX_STEPS = 30;
 const COMPUTER_USE_THRESHOLD = 3;
@@ -425,7 +426,7 @@ export class AgentLoop {
     await this.ensureContentScript();
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), 8000);
+      const timer = setTimeout(() => resolve(null), CAPTURE_TIMEOUT_MS);
 
       chrome.tabs.sendMessage(
         this.tabId,
@@ -451,8 +452,11 @@ export class AgentLoop {
           if (chrome.runtime.lastError || !res) {
             chrome.scripting
               .executeScript({ target: { tabId: this.tabId }, files: ['content/index.js'] })
-              .then(() => setTimeout(resolve, 400))
-              .catch(() => resolve());
+              .then(() => setTimeout(resolve, SCRIPT_INJECT_DELAY_MS))
+              .catch((err) => {
+                console.error('[AgentLoop] Falha ao injetar content script:', err);
+                resolve();
+              });
           } else {
             resolve();
           }

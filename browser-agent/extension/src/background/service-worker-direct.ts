@@ -15,6 +15,9 @@ let currentLoop: AgentLoop | null = null;
 // ── Listeners ─────────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
+  // Solicita permissão de host para poder injetar content scripts em qualquer aba.
+  // O usuário só precisa aprovar uma vez após instalar.
+  chrome.permissions.request({ origins: ['<all_urls>'] }).catch(() => {});
   console.log('[BrowserAgent] Extensão instalada — modo direto (sem backend).');
 });
 
@@ -32,7 +35,6 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
 
   switch (type) {
 
-    // Side panel inicia uma tarefa em linguagem natural
     case 'START_TASK': {
       const { tabId, objective } = (msg as { type: string; payload: { tabId: number; objective: string } }).payload;
       if (currentLoop) currentLoop.stop();
@@ -53,7 +55,6 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
-    // Side panel para a tarefa
     case 'STOP_TASK': {
       currentLoop?.stop();
       currentLoop = null;
@@ -61,7 +62,6 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
-    // Resposta do usuário para ação destrutiva (confirmação via ConfirmationModal)
     case 'CONFIRM_ACTION': {
       const { confirmed } = (msg as { type: string; payload: { confirmed: boolean } }).payload;
       currentLoop?.resolveConfirmation(confirmed);
@@ -69,7 +69,6 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
-    // Scan manual de acessibilidade da aba
     case 'CAPTURE_TREE_FOR_TAB': {
       const { tabId } = (msg as { type: string; payload: { tabId: number } }).payload;
       await injectContentIfNeeded(tabId);
@@ -81,7 +80,6 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
-    // Passagem transparente de eventos para o side panel
     case 'TREE_CAPTURED':
     case 'ACTION_RESULT':
     case 'STATUS_UPDATE':
@@ -108,6 +106,8 @@ async function injectContentIfNeeded(tabId: number): Promise<void> {
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['content/index.js'],
+    }).catch((err) => {
+      console.error('[BrowserAgent] Falha ao injetar content script:', err);
     });
   }
 }
