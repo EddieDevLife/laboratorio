@@ -147,9 +147,24 @@ export type InternalMessage =
   // Direct Gemini integration (no backend)
   | { type: 'USER_COMMAND'; payload: { command: string; snapshot: PageSnapshot; screenshot?: string } }
   | { type: 'GET_API_KEY_STATUS' }
-  | { type: 'SET_API_KEY'; payload: { apiKey: string } };
+  | { type: 'SET_API_KEY'; payload: { apiKey: string } }
+  | { type: 'START_TASK'; payload: { tabId: number; objective: string } }
+  | { type: 'STOP_TASK' }
+  | { type: 'AGENT_STATE'; payload: AgentState }
+  | { type: 'EXECUTE_ACTION'; payload: Record<string, unknown> }
+  | { type: 'CONFIRM_ACTION'; payload: { confirmed: boolean } };
 
 export type AgentStatus = 'idle' | 'scanning' | 'running' | 'waiting' | 'error';
+
+export interface AgentState {
+  status: 'idle' | 'running' | 'done' | 'error';
+  step: number;
+  lastAction?: string;
+  lastReasoning?: string;
+  narration: string;
+  isDestructive?: boolean;
+  error?: string;
+}
 
 // ─── Utilitários compartilhados ───────────────────────────────────────────────
 

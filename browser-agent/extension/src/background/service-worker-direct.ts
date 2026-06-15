@@ -61,6 +61,14 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
+    // Resposta do usuário para ação destrutiva (confirmação via ConfirmationModal)
+    case 'CONFIRM_ACTION': {
+      const { confirmed } = (msg as { type: string; payload: { confirmed: boolean } }).payload;
+      currentLoop?.resolveConfirmation(confirmed);
+      reply({ ok: true });
+      break;
+    }
+
     // Scan manual de acessibilidade da aba
     case 'CAPTURE_TREE_FOR_TAB': {
       const { tabId } = (msg as { type: string; payload: { tabId: number } }).payload;

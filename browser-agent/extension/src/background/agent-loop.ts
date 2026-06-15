@@ -13,6 +13,8 @@
 
 import { callClaude, getSettings, type Message, type ContentBlock, type Tool } from './llm-client.js';
 import type { InternalMessage, AccessibilityNode, PageSnapshot } from '../shared/types.js';
+import { buildNarration } from './narration.js';
+import { isDestructive } from './destructive-detector.js';
 
 const MAX_STEPS = 30;
 const COMPUTER_USE_THRESHOLD = 3;
@@ -118,6 +120,8 @@ export interface LoopState {
   step: number;
   lastAction?: string;
   lastReasoning?: string;
+  narration: string;
+  isDestructive?: boolean;
   error?: string;
 }
 
@@ -131,6 +135,7 @@ export class AgentLoop {
   private lastPageText: string | null = null;
   private onStatusChange: (s: LoopState) => void;
   private stopped = false;
+  private confirmationResolve: ((confirmed: boolean) => void) | null = null;
 
   constructor(opts: {
     tabId: number;
@@ -142,7 +147,22 @@ export class AgentLoop {
     this.onStatusChange = opts.onStatusChange;
   }
 
-  stop() { this.stopped = true; }
+  stop() {
+    this.stopped = true;
+    this.confirmationResolve?.(false);
+  }
+
+  resolveConfirmation(confirmed: boolean) {
+    this.confirmationResolve?.(confirmed);
+    this.confirmationResolve = null;
+  }
+
+  private waitForConfirmation(actionLabel: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      this.confirmationResolve = resolve;
+      this.emitFull('running', this.step, actionLabel, undefined, undefined, true);
+    });
+  }
 
   async run(): Promise<void> {
     this.emit('running', 0, 'Iniciando...');
@@ -212,7 +232,8 @@ export class AgentLoop {
     const action = input['action'] as string;
     const reasoning = (input['reasoning'] as string) ?? '';
 
-    this.emit('running', this.step, action, undefined, reasoning);
+    const narration = buildNarration({ action, ...input });
+    this.emitFull('running', this.step, action, undefined, reasoning, false, narration);
 
     if (action === 'done') return true;
     if (action === 'screenshot') {
@@ -222,9 +243,18 @@ export class AgentLoop {
       return false;
     }
 
+    // Verifica se a ação é destrutiva — pausa e aguarda confirmação do usuário
+    const enriched = this.enrichWithNodeInfo(input);
+    if (isDestructive({ action, name: enriched['name'] as string, role: enriched['role'] as string, url: enriched['url'] as string, reasoning })) {
+      const confirmed = await this.waitForConfirmation(narration);
+      if (!confirmed) {
+        this.pushToolResult(toolUse.id!, 'User cancelled this action. Plan an alternative.');
+        return false;
+      }
+    }
+
     // Executa a ação no content script
     // Enriquece com name+role do indexMap para que resolveNode funcione
-    const enriched = this.enrichWithNodeInfo(input);
     const nodeId = this.resolveNodeId(enriched);
     const result = await this.executeAction({ action, input: enriched, nodeId });
 
@@ -502,12 +532,29 @@ export class AgentLoop {
     error?: string,
     lastReasoning?: string,
   ) {
-    this.onStatusChange({ status, step, lastAction, lastReasoning, error });
+    this.emitFull(status, step, lastAction, error, lastReasoning, false, lastAction ?? '');
+  }
+
+  private emitFull(
+    status: LoopStatus,
+    step: number,
+    lastAction?: string,
+    error?: string,
+    lastReasoning?: string,
+    isDestructiveAction = false,
+    narration = '',
+  ) {
+    const state: LoopState = { status, step, lastAction, lastReasoning, narration, isDestructive: isDestructiveAction, error };
+    this.onStatusChange(state);
+    broadcast({
+      type: 'AGENT_STATE',
+      payload: state,
+    } as unknown as InternalMessage);
     broadcast({
       type: 'STATUS_UPDATE',
       payload: {
         status: status === 'running' ? 'running' : status === 'done' ? 'idle' : 'error',
-        message: error ?? lastReasoning ?? lastAction ?? '',
+        message: error ?? narration ?? lastAction ?? '',
       },
     });
   }

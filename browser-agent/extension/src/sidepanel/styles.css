@@ -415,3 +415,17 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
+
+
+/* Acessibilidade: visível para screen readers, invisível na tela */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

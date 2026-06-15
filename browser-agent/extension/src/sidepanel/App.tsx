@@ -3,22 +3,19 @@ import type {
   PageSnapshot,
   AccessibilityNode,
   AgentStatus,
+  AgentState,
   InternalMessage,
 } from '../shared/types.js';
 import { collectFocusable } from '../shared/types.js';
 import AgentStatusBadge from './components/AgentStatus.js';
 import TreeNode from './components/TreeNode.js';
+import { ConfirmationModal } from './ConfirmationModal.js';
+import { useAnnouncer } from './hooks/useAnnouncer.js';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
+import { speak } from './tts/index.js';
 import type { Provider, StoredSettings } from '../background/llm-client.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-interface LoopState {
-  status: 'idle' | 'running' | 'done' | 'error';
-  step: number;
-  lastAction?: string;
-  lastReasoning?: string;
-  error?: string;
-}
 
 interface LogEntry { time: string; text: string; error: boolean }
 
@@ -26,14 +23,14 @@ interface LogEntry { time: string; text: string; error: boolean }
 
 export default function App() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle');
-  const [loopState, setLoopState] = useState<LoopState | null>(null);
+  const [agentState, setAgentState] = useState<AgentState | null>(null);
   const [snapshot, setSnapshot] = useState<PageSnapshot | null>(null);
   const [focusable, setFocusable] = useState<AccessibilityNode[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [objective, setObjective] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
 
-  // Settings
   const [settings, setSettings] = useState<StoredSettings>({
     llm_provider: 'gemini',
     anthropic_api_key: '',
@@ -45,9 +42,11 @@ export default function App() {
   const [settingsSaved, setSettingsSaved] = useState(false);
 
   const [activeTab, setActiveTab] = useState<{ url: string; title: string; id: number } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const objectiveRef = useRef<HTMLTextAreaElement>(null);
   const running = agentStatus === 'running' || agentStatus === 'scanning';
   const tabIsValid = !!activeTab && !activeTab.url.startsWith('chrome://') && !activeTab.url.startsWith('chrome-extension://');
+
+  const { announce } = useAnnouncer();
 
   // ── Monitor active tab ────────────────────────────────────────────────────
 
@@ -59,7 +58,6 @@ export default function App() {
       }
     }
     refreshTab();
-    // Atualiza quando o usuário muda de aba
     chrome.tabs.onActivated.addListener(refreshTab);
     chrome.tabs.onUpdated.addListener((_id, info) => { if (info.status === 'complete') refreshTab(); });
     return () => {
@@ -67,7 +65,7 @@ export default function App() {
     };
   }, []);
 
-  // ── Load settings on mount ─────────────────────────────────────────────────
+  // ── Load settings on mount ────────────────────────────────────────────────
 
   useEffect(() => {
     chrome.storage.local.get([
@@ -78,12 +76,12 @@ export default function App() {
     });
   }, []);
 
-  // ── Messages from service worker ───────────────────────────────────────────
+  // ── Messages from service worker ──────────────────────────────────────────
 
   useEffect(() => {
-    function onMessage(msg: InternalMessage) {
+    function onMessage(msg: InternalMessage & { type: string; payload?: unknown }) {
       if (msg.type === 'TREE_CAPTURED') {
-        const snap = msg.payload;
+        const snap = (msg as { type: string; payload: PageSnapshot }).payload;
         const fc = collectFocusable(snap.tree);
         setSnapshot(snap);
         setFocusable(fc);
@@ -93,26 +91,48 @@ export default function App() {
 
       if (msg.type === 'CAPTURE_ERROR') {
         setAgentStatus('error');
-        addLog(msg.payload.error, true);
+        addLog((msg as { type: string; payload: { error: string } }).payload.error, true);
       }
 
       if (msg.type === 'STATUS_UPDATE') {
-        if (msg.payload.status === 'running') setAgentStatus('running');
-        else if (msg.payload.status === 'error') setAgentStatus('error');
+        const p = (msg as { type: string; payload: { status: AgentStatus; message?: string } }).payload;
+        if (p.status === 'running') setAgentStatus('running');
+        else if (p.status === 'error') setAgentStatus('error');
         else setAgentStatus('idle');
-        if (msg.payload.message) addLog(msg.payload.message);
+        if (p.message) addLog(p.message);
       }
 
-      if ((msg as { type: string }).type === 'AGENT_STATE') {
-        const state = (msg as { type: string; payload: LoopState }).payload;
-        setLoopState(state);
+      if (msg.type === 'AGENT_STATE') {
+        const state = (msg as { type: string; payload: AgentState }).payload;
+        setAgentState(state);
+
         if (state.status === 'running') setAgentStatus('running');
-        else if (state.status === 'error') { setAgentStatus('error'); if (state.error) addLog(state.error, true); }
-        else setAgentStatus('idle');
+        else if (state.status === 'error') {
+          setAgentStatus('error');
+          if (state.error) addLog(state.error, true);
+        } else setAgentStatus('idle');
+
+        // Narração via TTS + ARIA
+        if (state.narration) {
+          const priority = state.isDestructive ? 'assertive' : 'polite';
+          speak(state.narration, priority).catch(() => {});
+          announce(state.narration, priority);
+          addLog(state.narration);
+        }
+
+        // Mostrar modal de confirmação para ações destrutivas
+        if (state.isDestructive && state.lastAction) {
+          setPendingConfirmation(state.narration || state.lastAction);
+        }
+
+        if (state.status === 'done') {
+          speak('Tarefa concluída', 'assertive').catch(() => {});
+          announce('Tarefa concluída', 'assertive');
+        }
       }
 
       if (msg.type === 'ACTION_RESULT') {
-        const r = msg.payload;
+        const r = (msg as { type: string; payload: { success: boolean; error?: string } }).payload;
         addLog(r.success ? 'Ação executada' : `Falha: ${r.error}`, !r.success);
       }
     }
@@ -123,9 +143,9 @@ export default function App() {
     return () => chrome.runtime.onMessage.removeListener(
       onMessage as Parameters<typeof chrome.runtime.onMessage.addListener>[0]
     );
-  }, []);
+  }, [announce]);
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   function addLog(text: string, error = false) {
     const time = new Date().toLocaleTimeString('pt-BR', {
@@ -134,7 +154,7 @@ export default function App() {
     setLog((prev) => [{ time, text, error }, ...prev].slice(0, 80));
   }
 
-  // ── Actions ────────────────────────────────────────────────────────────────
+  // ── Actions ───────────────────────────────────────────────────────────────
 
   const startTask = useCallback(async () => {
     if (!objective.trim()) return;
@@ -154,8 +174,10 @@ export default function App() {
     }
 
     setAgentStatus('running');
-    setLoopState({ status: 'running', step: 0, lastAction: 'Iniciando...' });
+    setAgentState({ status: 'running', step: 0, lastAction: 'Iniciando...', narration: 'Iniciando tarefa' });
     addLog(`Iniciando tarefa: "${objective.trim()}"`);
+    speak(`Iniciando tarefa: ${objective.trim()}`).catch(() => {});
+    announce(`Iniciando tarefa: ${objective.trim()}`);
 
     chrome.runtime.sendMessage({
       type: 'START_TASK',
@@ -163,14 +185,37 @@ export default function App() {
     } as unknown as InternalMessage);
 
     setObjective('');
-  }, [objective, settings]);
+  }, [objective, settings, announce]);
 
   const stopTask = useCallback(() => {
     chrome.runtime.sendMessage({ type: 'STOP_TASK' } as unknown as InternalMessage);
     setAgentStatus('idle');
-    setLoopState(null);
+    setAgentState(null);
+    setPendingConfirmation(null);
     addLog('Tarefa interrompida pelo usuário');
-  }, []);
+    speak('Tarefa interrompida', 'assertive').catch(() => {});
+    announce('Tarefa interrompida', 'assertive');
+  }, [announce]);
+
+  const confirmAction = useCallback(() => {
+    setPendingConfirmation(null);
+    chrome.runtime.sendMessage({
+      type: 'CONFIRM_ACTION',
+      payload: { confirmed: true },
+    } as unknown as InternalMessage);
+    speak('Confirmado. Executando.', 'polite').catch(() => {});
+    announce('Confirmado. Executando.');
+  }, [announce]);
+
+  const cancelAction = useCallback(() => {
+    setPendingConfirmation(null);
+    chrome.runtime.sendMessage({
+      type: 'CONFIRM_ACTION',
+      payload: { confirmed: false },
+    } as unknown as InternalMessage);
+    speak('Ação cancelada.', 'assertive').catch(() => {});
+    announce('Ação cancelada.', 'assertive');
+  }, [announce]);
 
   const scanPage = useCallback(async () => {
     setAgentStatus('scanning');
@@ -203,10 +248,32 @@ export default function App() {
     return '';
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+
+  useKeyboardShortcuts({
+    'ctrl+enter': () => { if (!running && tabIsValid) startTask(); },
+    'escape': () => { if (running) stopTask(); else if (pendingConfirmation) cancelAction(); },
+    'alt+t': () => objectiveRef.current?.focus(),
+    'alt+s': () => setShowSettings((s) => !s),
+  });
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="app">
+
+      {/* ARIA live regions (invisible to sighted users, read by screen readers) */}
+      <div id="agent-live-polite" role="status" aria-live="polite" aria-atomic="true" className="sr-only" />
+      <div id="agent-live-assertive" role="alert" aria-live="assertive" aria-atomic="true" className="sr-only" />
+
+      {/* Confirmation modal for destructive actions */}
+      {pendingConfirmation && (
+        <ConfirmationModal
+          action={pendingConfirmation}
+          onConfirm={confirmAction}
+          onCancel={cancelAction}
+        />
+      )}
 
       {/* Header */}
       <div className="header">
@@ -215,7 +282,9 @@ export default function App() {
           <AgentStatusBadge status={agentStatus} />
           <button
             onClick={() => setShowSettings((s) => !s)}
-            title="Configurações"
+            title="Configurações (Alt+S)"
+            aria-expanded={showSettings}
+            aria-label="Configurações"
             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: showSettings ? 'var(--blue)' : 'var(--text2)' }}
           >⚙️</button>
         </div>
@@ -223,13 +292,7 @@ export default function App() {
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="settings-panel" style={{
-          padding: 12,
-          borderBottom: '1px solid #333',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}>
+        <div className="settings-panel" style={{ padding: 12, borderBottom: '1px solid #333', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <h3 style={{ margin: 0, fontSize: 13 }}>Configurações de LLM</h3>
 
           <label style={{ fontSize: 12 }}>
@@ -248,73 +311,47 @@ export default function App() {
           {settings.llm_provider === 'anthropic' && (
             <label style={{ fontSize: 12 }}>
               Anthropic API Key
-              <input
-                type="password"
-                placeholder="sk-ant-..."
-                value={settings.anthropic_api_key ?? ''}
+              <input type="password" placeholder="sk-ant-..." value={settings.anthropic_api_key ?? ''}
                 onChange={(e) => setSettings((s) => ({ ...s, anthropic_api_key: e.target.value }))}
-                style={{ width: '100%', marginTop: 4 }}
-              />
+                style={{ width: '100%', marginTop: 4 }} />
             </label>
           )}
-
           {settings.llm_provider === 'openai' && (
             <>
               <label style={{ fontSize: 12 }}>
                 OpenAI API Key
-                <input
-                  type="password"
-                  placeholder="sk-..."
-                  value={settings.openai_api_key ?? ''}
+                <input type="password" placeholder="sk-..." value={settings.openai_api_key ?? ''}
                   onChange={(e) => setSettings((s) => ({ ...s, openai_api_key: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }}
-                />
+                  style={{ width: '100%', marginTop: 4 }} />
               </label>
               <label style={{ fontSize: 12 }}>
                 Modelo (opcional)
-                <input
-                  type="text"
-                  placeholder="gpt-4o"
-                  value={settings.openai_model ?? ''}
+                <input type="text" placeholder="gpt-4o" value={settings.openai_model ?? ''}
                   onChange={(e) => setSettings((s) => ({ ...s, openai_model: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }}
-                />
+                  style={{ width: '100%', marginTop: 4 }} />
               </label>
             </>
           )}
-
           {settings.llm_provider === 'gemini' && (
             <>
               <label style={{ fontSize: 12 }}>
                 Gemini API Key
-                <input
-                  type="password"
-                  placeholder="AIzaSy..."
-                  value={settings.gemini_api_key ?? ''}
+                <input type="password" placeholder="AIzaSy..." value={settings.gemini_api_key ?? ''}
                   onChange={(e) => setSettings((s) => ({ ...s, gemini_api_key: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }}
-                />
+                  style={{ width: '100%', marginTop: 4 }} />
               </label>
               <label style={{ fontSize: 12 }}>
                 Modelo (opcional)
-                <input
-                  type="text"
-                  placeholder="gemini-2.0-flash"
-                  value={settings.gemini_model ?? ''}
+                <input type="text" placeholder="gemini-2.0-flash" value={settings.gemini_model ?? ''}
                   onChange={(e) => setSettings((s) => ({ ...s, gemini_model: e.target.value }))}
-                  style={{ width: '100%', marginTop: 4 }}
-                />
+                  style={{ width: '100%', marginTop: 4 }} />
               </label>
             </>
           )}
 
-          <button
-            onClick={saveSettings}
-            style={{ alignSelf: 'flex-start', marginTop: 4 }}
-          >
+          <button onClick={saveSettings} style={{ alignSelf: 'flex-start', marginTop: 4 }}>
             {settingsSaved ? '✓ Salvo!' : 'Salvar'}
           </button>
-
           <p style={{ fontSize: 11, color: '#666', margin: 0 }}>
             As chaves ficam salvas localmente no seu Chrome. Nunca são enviadas a nenhum servidor próprio.
           </p>
@@ -324,24 +361,17 @@ export default function App() {
       {/* Task input */}
       <div className="command-section" style={{ padding: 12, borderBottom: '1px solid #333' }}>
 
-        {/* Aba ativa */}
+        {/* Active tab indicator */}
         <div style={{
-          fontSize: 11,
-          padding: '5px 8px',
-          marginBottom: 8,
-          borderRadius: 6,
+          fontSize: 11, padding: '5px 8px', marginBottom: 8, borderRadius: 6,
           background: tabIsValid ? '#1a3a1a' : '#3a1a1a',
           color: tabIsValid ? '#30d158' : '#ff453a',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
+          display: 'flex', alignItems: 'center', gap: 6,
         }}>
-          <span>{tabIsValid ? '🟢' : '🔴'}</span>
+          <span aria-hidden="true">{tabIsValid ? '🟢' : '🔴'}</span>
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {activeTab
-              ? tabIsValid
-                ? activeTab.title || activeTab.url
-                : 'Página interna (chrome://) — abra um site'
+              ? tabIsValid ? activeTab.title || activeTab.url : 'Página interna (chrome://) — abra um site'
               : 'Detectando aba...'}
           </span>
         </div>
@@ -352,32 +382,49 @@ export default function App() {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 6 }}>
-          <input
-            ref={inputRef}
-            type="text"
-            className="command-input"
-            placeholder='Objetivo: "Pesquisar por IA no Google"'
-            value={objective}
-            onChange={(e) => setObjective(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !running && tabIsValid) startTask(); }}
-            disabled={running || !tabIsValid}
-            style={{ flex: 1 }}
-          />
-          {running ? (
-            <button onClick={stopTask} style={{ background: '#ff453a', color: '#fff', border: 'none', borderRadius: 6, padding: '0 12px', cursor: 'pointer' }}>
-              Parar
-            </button>
-          ) : (
-            <button
-              className="btn-execute"
-              onClick={startTask}
-              disabled={!objective.trim() || !tabIsValid}
-              title={!tabIsValid ? 'Abra um site primeiro' : ''}
-            >
-              Iniciar
-            </button>
-          )}
+        <div style={{ display: 'flex', gap: 6, flexDirection: 'column' }}>
+          <label htmlFor="objective-input" style={{ fontSize: 11, color: '#888' }}>
+            Descreva o que deseja fazer (Ctrl+Enter para iniciar)
+          </label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <textarea
+              id="objective-input"
+              ref={objectiveRef}
+              className="command-input"
+              placeholder='Exemplo: "Pesquisar por IA no Google"'
+              value={objective}
+              onChange={(e) => setObjective(e.target.value)}
+              disabled={running || !tabIsValid}
+              rows={2}
+              aria-label="Descreva o que deseja fazer"
+              aria-describedby="objective-hint"
+              style={{ flex: 1, resize: 'vertical', minHeight: 42 }}
+              autoFocus
+            />
+            {running ? (
+              <button
+                onClick={stopTask}
+                aria-label="Parar tarefa (Escape)"
+                style={{ background: '#ff453a', color: '#fff', border: 'none', borderRadius: 6, padding: '0 12px', cursor: 'pointer', alignSelf: 'stretch' }}
+              >
+                Parar
+              </button>
+            ) : (
+              <button
+                className="btn-execute"
+                onClick={startTask}
+                disabled={!objective.trim() || !tabIsValid}
+                aria-label="Iniciar tarefa (Ctrl+Enter)"
+                title={!tabIsValid ? 'Abra um site primeiro' : 'Iniciar tarefa (Ctrl+Enter)'}
+                style={{ alignSelf: 'stretch' }}
+              >
+                Iniciar
+              </button>
+            )}
+          </div>
+          <span id="objective-hint" className="sr-only">
+            Use Ctrl+Enter para iniciar. Escape para parar. Alt+S para configurações.
+          </span>
         </div>
 
         {/* Provider indicator */}
@@ -389,12 +436,12 @@ export default function App() {
         </div>
 
         {/* Agent state */}
-        {loopState && loopState.status === 'running' && (
-          <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
-            Passo {loopState.step} — {loopState.lastAction}
-            {loopState.lastReasoning && (
+        {agentState && agentState.status === 'running' && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#888' }} aria-live="polite">
+            Passo {agentState.step} — {agentState.narration || agentState.lastAction}
+            {agentState.lastReasoning && (
               <div style={{ marginTop: 2, color: '#666', fontStyle: 'italic' }}>
-                {loopState.lastReasoning.substring(0, 120)}
+                {agentState.lastReasoning.substring(0, 120)}
               </div>
             )}
           </div>
@@ -411,7 +458,6 @@ export default function App() {
         >
           {agentStatus === 'scanning' ? 'Escaneando...' : 'Escanear Página'}
         </button>
-
         {snapshot && (
           <span className={`source-badge source-${snapshot.source}`}>
             {snapshot.source === 'cdp' ? 'CDP' : 'DOM'}
@@ -449,15 +495,7 @@ export default function App() {
         <div className="focusable-panel" style={{ borderTop: '1px solid #333', maxHeight: 130 }}>
           <h3>Log</h3>
           {log.map((entry, i) => (
-            <div
-              key={i}
-              className="focusable-item"
-              style={{
-                fontFamily: 'monospace',
-                fontSize: 11,
-                color: entry.error ? '#ff453a' : '#888',
-              }}
-            >
+            <div key={i} className="focusable-item" style={{ fontFamily: 'monospace', fontSize: 11, color: entry.error ? '#ff453a' : '#888' }}>
               [{entry.time}] {entry.text}
             </div>
           ))}
