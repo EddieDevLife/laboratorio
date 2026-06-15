@@ -1,0 +1,14 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# API keys — nunca commitar chaves
+.env
+.env.local
+.env.*.local
+secrets.json
+api-keys.json
+*.pem
