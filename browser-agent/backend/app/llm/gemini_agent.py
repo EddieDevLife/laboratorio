@@ -39,7 +39,7 @@ class GeminiAgent:
         
         # Use Gemini 2.0 Flash with vision capabilities
         self.model = genai.GenerativeModel(
-            model_name='gemini-2.0-flash-exp',
+            model_name='gemini-3.0-flash-lite',
             safety_settings={
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -48,7 +48,7 @@ class GeminiAgent:
             }
         )
         
-        logger.info(f"GeminiAgent initialized with model: gemini-2.0-flash-exp")
+        logger.info(f"GeminiAgent initialized with model: gemini-3.0-flash-lite")
     
     async def analyze_and_plan(
         self,
