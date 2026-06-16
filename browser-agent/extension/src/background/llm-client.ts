@@ -191,14 +191,16 @@ export const callClaude = callLLM;
 
 // ── Retry on 429 ─────────────────────────────────────────────────────────────
 
+const MAX_RETRY_WAIT_MS = 5_000;
+
 function parseRetryAfterMs(body: string, headers: Headers): number {
   // Groq devolve o tempo no JSON: "Please try again in 16.3s"
   const match = body.match(/try again in ([\d.]+)s/i);
-  if (match) return Math.ceil(parseFloat(match[1]) * 1000) + 500;
+  if (match) return Math.min(Math.ceil(parseFloat(match[1]) * 1000) + 200, MAX_RETRY_WAIT_MS);
   // Cabeçalho padrão Retry-After (segundos)
   const hdr = headers.get('retry-after');
-  if (hdr) return (parseInt(hdr, 10) || 10) * 1000 + 500;
-  return 15_000;
+  if (hdr) return Math.min((parseInt(hdr, 10) || 5) * 1000, MAX_RETRY_WAIT_MS);
+  return MAX_RETRY_WAIT_MS;
 }
 
 async function fetchWithRetry(
