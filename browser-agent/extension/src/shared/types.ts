@@ -151,7 +151,8 @@ export type InternalMessage =
   | { type: 'EXECUTE_ACTION'; payload: Record<string, unknown> }
   | { type: '__PING__' }
   | { type: 'AGENT_STATE'; payload: AgentState }
-  | { type: 'CONFIRM_ACTION'; payload: { confirmed: boolean } };
+  | { type: 'CONFIRM_ACTION'; payload: { confirmed: boolean } }
+  | { type: 'HUMAN_INPUT'; payload: { answer: string } };
 
 export type AgentStatus = 'idle' | 'scanning' | 'running' | 'waiting' | 'done' | 'error';
 
@@ -163,6 +164,13 @@ export interface AgentState {
   narration: string;
   isDestructive?: boolean;
   error?: string;
+  humanInputRequest?: string;   // pergunta do agente aguardando resposta humana
+}
+
+export interface ChatMessage {
+  role: 'agent' | 'user';
+  text: string;
+  time: string;
 }
 
 // ─── Utilitários compartilhados ───────────────────────────────────────────────

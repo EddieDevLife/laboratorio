@@ -69,6 +69,13 @@ async function handleMessage(msg: InternalMessage, reply: (r: unknown) => void) 
       break;
     }
 
+    case 'HUMAN_INPUT': {
+      const { answer } = (msg as { type: string; payload: { answer: string } }).payload;
+      currentLoop?.resolveHumanInput(answer);
+      reply({ ok: true });
+      break;
+    }
+
     case 'CAPTURE_TREE_FOR_TAB': {
       const { tabId } = (msg as { type: string; payload: { tabId: number } }).payload;
       await injectContentIfNeeded(tabId);

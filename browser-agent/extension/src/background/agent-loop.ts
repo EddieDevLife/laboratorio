@@ -28,13 +28,13 @@ const BROWSER_ACTION_TOOL: Tool = {
     properties: {
       action: {
         type: 'string',
-        enum: ['click', 'type', 'press_key', 'scroll', 'navigate', 'wait', 'screenshot', 'done'],
-        description: 'Action to take. Use "done" when the task is complete.',
+        enum: ['click', 'type', 'press_key', 'scroll', 'navigate', 'wait', 'screenshot', 'ask_human', 'done'],
+        description: 'Action to take. Use "ask_human" to request information from the user (e.g. password, 2FA code, choice). Use "done" when the task is complete.',
       },
       index: { type: 'number', description: 'Interactive element index from the page state (preferred).' },
       name: { type: 'string', description: 'Accessible name of the element (fallback if no index).' },
       role: { type: 'string', description: 'ARIA role of the element (fallback).' },
-      text: { type: 'string', description: 'Text to type (for "type" action).' },
+      text: { type: 'string', description: 'Text to type (for "type" action) or question to ask the user (for "ask_human" action).' },
       key: { type: 'string', description: 'Key to press, e.g. "Enter", "Tab", "Escape".' },
       url: { type: 'string', description: 'URL to navigate to.' },
       deltaY: { type: 'number', description: 'Pixels to scroll vertically (positive=down).' },
@@ -105,7 +105,7 @@ function buildPageState(snapshot: PageSnapshot): { text: string; indexMap: Map<n
 
 // ── Agent Loop ─────────────────────────────────────────────────────────────────
 
-export type LoopStatus = 'idle' | 'running' | 'done' | 'error';
+export type LoopStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
 
 export interface LoopState {
   status: LoopStatus;
@@ -139,10 +139,33 @@ export class AgentLoop {
   stop() { this.stopped = true; }
 
   private confirmationResolver: ((confirmed: boolean) => void) | null = null;
+  private humanInputResolver: ((answer: string) => void) | null = null;
 
   resolveConfirmation(confirmed: boolean) {
     this.confirmationResolver?.(confirmed);
     this.confirmationResolver = null;
+  }
+
+  resolveHumanInput(answer: string) {
+    this.humanInputResolver?.(answer);
+    this.humanInputResolver = null;
+  }
+
+  private waitForHumanInput(question: string): Promise<string> {
+    // Notifica a UI que o agente precisa de input humano
+    broadcast({
+      type: 'AGENT_STATE',
+      payload: {
+        status: 'waiting',
+        step: this.step,
+        lastAction: 'ask_human',
+        narration: question,
+        humanInputRequest: question,
+      },
+    });
+    return new Promise((resolve) => {
+      this.humanInputResolver = resolve;
+    });
   }
 
   async run(): Promise<void> {
@@ -216,6 +239,18 @@ export class AgentLoop {
     this.emit('running', this.step, action, undefined, reasoning);
 
     if (action === 'done') return true;
+
+    if (action === 'ask_human') {
+      const question = (input['text'] as string) || (input['reasoning'] as string) || 'Por favor, forneça a informação solicitada.';
+      this.emit('waiting', this.step, 'ask_human', undefined, question);
+      const answer = await this.waitForHumanInput(question);
+      this.pushToolResult(toolUse.id!, `User provided: ${answer}`);
+      // Injeta a resposta como contexto para o próximo passo
+      this.messages.push({ role: 'user', content: `[Human input received]: ${answer}` });
+      this.emit('running', this.step, 'ask_human', undefined, `Resposta recebida: "${answer}"`);
+      return false;
+    }
+
     if (action === 'screenshot') {
       // Claude quer um screenshot → sinaliza para acionar computer use no próximo step
       this.consecutiveFailures = COMPUTER_USE_THRESHOLD;

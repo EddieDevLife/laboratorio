@@ -5,6 +5,7 @@ import type {
   AgentStatus,
   AgentState,
   InternalMessage,
+  ChatMessage,
 } from '../shared/types.js';
 import { collectFocusable } from '../shared/types.js';
 import AgentStatusBadge from './components/AgentStatus.js';
@@ -20,6 +21,10 @@ import type { Provider, StoredSettings } from '../background/llm-client.js';
 
 interface LogEntry { time: string; text: string; error: boolean }
 
+function nowTime() {
+  return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -31,6 +36,10 @@ export default function App() {
   const [objective, setObjective] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
+  const [humanInputRequest, setHumanInputRequest] = useState<string | null>(null);
+  const [humanInputDraft, setHumanInputDraft] = useState('');
+  const [chat, setChat] = useState<ChatMessage[]>([]);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
 
   const [settings, setSettings] = useState<StoredSettings>({
     llm_provider: 'gemini',
@@ -128,6 +137,14 @@ export default function App() {
           setPendingConfirmation(state.narration || state.lastAction);
         }
 
+        // Agente pediu input humano
+        if (state.humanInputRequest) {
+          setHumanInputRequest(state.humanInputRequest);
+          addChat('agent', state.humanInputRequest);
+          speak(state.humanInputRequest, 'assertive').catch(() => {});
+          announce(state.humanInputRequest, 'assertive');
+        }
+
         if (state.status === 'done') {
           speak('Tarefa concluída', 'assertive').catch(() => {});
           announce('Tarefa concluída', 'assertive');
@@ -151,10 +168,12 @@ export default function App() {
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   function addLog(text: string, error = false) {
-    const time = new Date().toLocaleTimeString('pt-BR', {
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
-    setLog((prev) => [{ time, text, error }, ...prev].slice(0, 80));
+    setLog((prev) => [{ time: nowTime(), text, error }, ...prev].slice(0, 80));
+  }
+
+  function addChat(role: 'agent' | 'user', text: string) {
+    setChat((prev) => [...prev, { role, text, time: nowTime() }]);
+    setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
@@ -178,6 +197,8 @@ export default function App() {
 
     setAgentStatus('running');
     setAgentState({ status: 'running', step: 0, lastAction: 'Iniciando...', narration: 'Iniciando tarefa' });
+    setChat([]);
+    setHumanInputRequest(null);
     addLog(`Iniciando tarefa: "${objective.trim()}"`);
     speak(`Iniciando tarefa: ${objective.trim()}`).catch(() => {});
     announce(`Iniciando tarefa: ${objective.trim()}`);
@@ -195,6 +216,7 @@ export default function App() {
     setAgentStatus('idle');
     setAgentState(null);
     setPendingConfirmation(null);
+    setHumanInputRequest(null);
     addLog('Tarefa interrompida pelo usuário');
     speak('Tarefa interrompida', 'assertive').catch(() => {});
     announce('Tarefa interrompida', 'assertive');
@@ -219,6 +241,17 @@ export default function App() {
     speak('Ação cancelada.', 'assertive').catch(() => {});
     announce('Ação cancelada.', 'assertive');
   }, [announce]);
+
+  const sendHumanInput = useCallback((text: string) => {
+    if (!text.trim()) return;
+    addChat('user', text.trim());
+    setHumanInputRequest(null);
+    setHumanInputDraft('');
+    chrome.runtime.sendMessage({
+      type: 'HUMAN_INPUT',
+      payload: { answer: text.trim() },
+    } as unknown as InternalMessage);
+  }, []);
 
   const scanPage = useCallback(async () => {
     setAgentStatus('scanning');
@@ -566,6 +599,79 @@ export default function App() {
               <span className="fi-name">{node.name || '(sem nome)'}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Chat */}
+      {(chat.length > 0 || running) && (
+        <div style={{ borderTop: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ maxHeight: 180, overflowY: 'auto', padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {chat.map((msg, i) => (
+              <div key={i} style={{
+                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                maxWidth: '85%',
+                padding: '6px 10px',
+                borderRadius: msg.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
+                background: msg.role === 'user' ? '#1a3a5a' : '#2a2a2a',
+                color: msg.role === 'user' ? '#64b5f6' : '#ccc',
+                fontSize: 12,
+              }}>
+                <div style={{ fontSize: 10, color: '#666', marginBottom: 2 }}>
+                  {msg.role === 'agent' ? 'Agente' : 'Você'} · {msg.time}
+                </div>
+                {msg.text}
+              </div>
+            ))}
+            <div ref={chatBottomRef} />
+          </div>
+
+          {/* Input humano solicitado pelo agente */}
+          {humanInputRequest && (
+            <div style={{ padding: '8px 12px', borderTop: '1px solid #333', background: '#1a2a3a' }}>
+              <div style={{ fontSize: 11, color: '#64b5f6', marginBottom: 4 }}>
+                O agente aguarda sua resposta:
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="Digite sua resposta..."
+                  value={humanInputDraft}
+                  onChange={(e) => setHumanInputDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') sendHumanInput(humanInputDraft); }}
+                  style={{ flex: 1, background: '#111', border: '1px solid #444', color: '#fff', borderRadius: 6, padding: '4px 8px', fontSize: 12 }}
+                />
+                <button
+                  onClick={() => sendHumanInput(humanInputDraft)}
+                  disabled={!humanInputDraft.trim()}
+                  style={{ background: '#1a3a5a', color: '#64b5f6', border: '1px solid #64b5f6', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}
+                >
+                  Enviar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Input espontâneo (usuário envia mensagem a qualquer momento durante execução) */}
+          {running && !humanInputRequest && (
+            <div style={{ padding: '6px 12px', borderTop: '1px solid #222', display: 'flex', gap: 6 }}>
+              <input
+                type="text"
+                placeholder="Enviar instrução ao agente..."
+                value={humanInputDraft}
+                onChange={(e) => setHumanInputDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') sendHumanInput(humanInputDraft); }}
+                style={{ flex: 1, background: '#111', border: '1px solid #333', color: '#fff', borderRadius: 6, padding: '4px 8px', fontSize: 12 }}
+              />
+              <button
+                onClick={() => sendHumanInput(humanInputDraft)}
+                disabled={!humanInputDraft.trim()}
+                style={{ background: '#222', color: '#888', border: '1px solid #444', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: 12 }}
+              >
+                ↑
+              </button>
+            </div>
+          )}
         </div>
       )}
 
