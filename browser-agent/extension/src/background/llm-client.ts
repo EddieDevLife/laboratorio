@@ -189,6 +189,37 @@ export async function callLLM(opts: LLMConfig): Promise<LLMResponse> {
 // Mantém compatibilidade com agent-loop.ts que importa callClaude
 export const callClaude = callLLM;
 
+// ── Retry on 429 ─────────────────────────────────────────────────────────────
+
+function parseRetryAfterMs(body: string, headers: Headers): number {
+  // Groq devolve o tempo no JSON: "Please try again in 16.3s"
+  const match = body.match(/try again in ([\d.]+)s/i);
+  if (match) return Math.ceil(parseFloat(match[1]) * 1000) + 500;
+  // Cabeçalho padrão Retry-After (segundos)
+  const hdr = headers.get('retry-after');
+  if (hdr) return (parseInt(hdr, 10) || 10) * 1000 + 500;
+  return 15_000;
+}
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  providerId: string,
+  maxRetries = 3,
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 || attempt >= maxRetries) return res;
+
+    const body = await res.text();
+    const waitMs = parseRetryAfterMs(body, res.headers);
+    console.warn(`[LLM] ${providerId} rate-limit — aguardando ${(waitMs / 1000).toFixed(1)}s...`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    attempt++;
+  }
+}
+
 // ── OpenAI-compatível (OpenAI, Mistral, Groq, Together, Perplexity, Custom) ──
 
 async function callOpenAICompat(
@@ -228,14 +259,14 @@ async function callOpenAICompat(
     body['tool_choice'] = 'auto';
   }
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
-  });
+  }, providerId);
 
   if (!res.ok) throw new Error(`${providerId} ${res.status}: ${await res.text()}`);
 
@@ -332,11 +363,11 @@ async function callGemini(
     body['toolConfig'] = { functionCallingConfig: { mode: 'AUTO' } };
   }
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, 'gemini');
 
   if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
 
