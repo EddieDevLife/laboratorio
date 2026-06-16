@@ -9,10 +9,7 @@
     "tabs",
     "activeTab",
     "storage",
-    "scripting"
-  ],
-
-  "optional_permissions": [
+    "scripting",
     "debugger"
   ],
 
