@@ -229,7 +229,7 @@ export class AgentLoop {
     const nodeId = this.resolveNodeId(enriched);
     const result = await this.executeAction({ action, input: enriched, nodeId });
 
-    this.pushToolResult(toolUse.id!, result.success ? 'Action executed successfully.' : `Error: ${result.error}`);
+    this.pushToolResult(toolUse.id!, result.success ? describeSuccess(action, enriched) : `Error: ${result.error}`);
 
     if (result.success) {
       this.consecutiveFailures = 0;
@@ -427,6 +427,36 @@ export class AgentLoop {
 
 function broadcast(msg: InternalMessage) {
   chrome.runtime.sendMessage(msg).catch(() => {});
+}
+
+// ── Action result descriptions ────────────────────────────────────────────────
+
+function describeSuccess(action: string, input: Record<string, unknown>): string {
+  switch (action) {
+    case 'type': {
+      const text = input['text'] as string ?? '';
+      const name = input['name'] as string ?? 'field';
+      return `Typed "${text}" into "${name}". The field now contains this text. Do NOT type again — proceed to click the search/submit button.`;
+    }
+    case 'click': {
+      const name = input['name'] as string ?? input['role'] as string ?? 'element';
+      return `Clicked "${name}" successfully.`;
+    }
+    case 'navigate': {
+      const url = input['url'] as string ?? '';
+      return `Navigated to ${url}. Wait for page to load.`;
+    }
+    case 'scroll':
+      return `Scrolled page successfully.`;
+    case 'press_key': {
+      const key = input['key'] as string ?? '';
+      return `Pressed key "${key}".`;
+    }
+    case 'clear':
+      return `Field cleared successfully.`;
+    default:
+      return `Action "${action}" executed successfully.`;
+  }
 }
 
 // ── System prompts ────────────────────────────────────────────────────────────
