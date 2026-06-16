@@ -36,6 +36,8 @@ export default function App() {
     llm_provider: 'gemini',
   });
   const [settingsSaved, setSettingsSaved] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [testing, setTesting] = useState(false);
 
   const [activeTab, setActiveTab] = useState<{ url: string; title: string; id: number } | null>(null);
   const objectiveRef = useRef<HTMLTextAreaElement>(null);
@@ -242,12 +244,52 @@ export default function App() {
     setTimeout(() => setSettingsSaved(false), 2000);
   }, [settings]);
 
+  const activeProviderDef = PROVIDERS.find((p) => p.id === (settings.llm_provider ?? 'openai'));
+
+  const testApiKey = useCallback(async () => {
+    const provDef = PROVIDERS.find((p) => p.id === (settings.llm_provider ?? 'openai'));
+    if (!provDef) return;
+    const activeProviderDef = provDef;
+    const apiKey = (settings[`${activeProviderDef.id}_api_key`] as string | undefined) ?? '';
+    if (!apiKey) { setTestResult({ ok: false, msg: 'Cole a API key primeiro.' }); return; }
+
+    setTesting(true);
+    setTestResult(null);
+    try {
+      if (activeProviderDef.id === 'gemini') {
+        const model = (settings['gemini_model'] as string | undefined) || 'gemini-2.0-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 1 } }),
+        });
+        if (res.ok) setTestResult({ ok: true, msg: 'Chave válida!' });
+        else { const e = await res.json(); setTestResult({ ok: false, msg: `${res.status}: ${e?.error?.message ?? res.statusText}` }); }
+      } else {
+        const baseUrl = activeProviderDef.id === 'custom'
+          ? (settings.custom_base_url ?? '').replace(/\/$/, '')
+          : activeProviderDef.baseUrl;
+        if (!baseUrl) { setTestResult({ ok: false, msg: 'URL base não preenchida.' }); setTesting(false); return; }
+        const model = (settings[`${activeProviderDef.id}_model`] as string | undefined) || activeProviderDef.defaultModel;
+        const res = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify({ model: model || 'gpt-4o-mini', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        });
+        if (res.ok) setTestResult({ ok: true, msg: 'Chave válida!' });
+        else { const e = await res.json(); setTestResult({ ok: false, msg: `${res.status}: ${e?.error?.message ?? res.statusText}` }); }
+      }
+    } catch (err) {
+      setTestResult({ ok: false, msg: err instanceof Error ? err.message : 'Erro de rede' });
+    }
+    setTesting(false);
+  }, [settings, activeProviderDef]);
+
   function activeApiKey(): string {
     const id = settings.llm_provider ?? 'openai';
     return (settings[`${id}_api_key`] as string | undefined) ?? '';
   }
-
-  const activeProviderDef = PROVIDERS.find((p) => p.id === (settings.llm_provider ?? 'openai'));
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
 
@@ -366,9 +408,29 @@ export default function App() {
             </label>
           )}
 
-          <button onClick={saveSettings} style={{ alignSelf: 'flex-start', marginTop: 4 }}>
-            {settingsSaved ? '✓ Salvo!' : 'Salvar'}
-          </button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button onClick={saveSettings}>
+              {settingsSaved ? '✓ Salvo!' : 'Salvar'}
+            </button>
+            <button
+              onClick={testApiKey}
+              disabled={testing}
+              style={{ background: '#1a3a2a', color: '#30d158', border: '1px solid #30d158', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}
+            >
+              {testing ? 'Testando...' : 'Testar chave'}
+            </button>
+          </div>
+
+          {testResult && (
+            <div style={{ fontSize: 12, padding: '6px 8px', borderRadius: 6, marginTop: 2,
+              background: testResult.ok ? '#1a3a1a' : '#3a1a1a',
+              color: testResult.ok ? '#30d158' : '#ff453a',
+              border: `1px solid ${testResult.ok ? '#30d158' : '#ff453a'}`,
+            }}>
+              {testResult.ok ? '✓ ' : '✗ '}{testResult.msg}
+            </div>
+          )}
+
           <p style={{ fontSize: 11, color: '#666', margin: 0 }}>
             As chaves ficam salvas localmente no seu Chrome. Nunca são enviadas a nenhum servidor próprio.
           </p>
